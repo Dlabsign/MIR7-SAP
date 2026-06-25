@@ -1,0 +1,1479 @@
+<%@page language="abap"%>
+
+<%@extension name="htmlb" prefix="htmlb"%>
+
+<%
+
+  "==========================================================================
+
+  " invoice_form.htm
+
+  " Handler utama untuk Park Invoice ke SAP via BAPI_INCOMINGINVOICE_PARK.
+
+  "==========================================================================
+
+
+
+  "========== TYPE DEFINITIONS ==========
+
+  TYPES: BEGIN OF ty_item_parsed,
+
+           invoice_doc_item TYPE n LENGTH 6,
+
+           po_number        TYPE ekko-ebeln,
+
+           po_item          TYPE ekpo-ebelp,
+
+           bukrs            TYPE ekko-bukrs,
+
+           quantity         TYPE ekbe-menge,
+
+           po_unit          TYPE ekpo-meins,
+
+           item_amount      TYPE bapiwrbtr,
+
+           ref_doc          TYPE ekbe-belnr,
+
+           ref_doc_year     TYPE ekbe-gjahr,
+
+           ref_doc_it       TYPE ekbe-buzei,
+
+           tax_code         TYPE mwskz,
+
+         END OF ty_item_parsed.
+
+  TYPES tt_items_parsed TYPE STANDARD TABLE OF ty_item_parsed WITH EMPTY KEY.
+
+
+
+  " [DIPINDAHKAN KE SINI] Struktur untuk parsing JSON W/Tax
+
+  TYPES: BEGIN OF ty_wtax_parsed,
+
+           wtax_type   TYPE string,
+
+           wtax_code   TYPE string,
+
+           wtax_base   TYPE string,
+
+           wtax_amount TYPE string,
+
+           wtax_pct    TYPE string,
+
+         END OF ty_wtax_parsed.
+
+  TYPES tt_wtax_parsed TYPE STANDARD TABLE OF ty_wtax_parsed WITH EMPTY KEY.
+
+
+
+  " Struktur tambahan untuk UI Material Items
+
+  TYPES: BEGIN OF ty_ui_item,
+
+           itm        TYPE string,
+
+           po_number  TYPE ebeln,
+
+           material   TYPE matnr,
+
+           value_str  TYPE c LENGTH 30,
+
+           value_num  TYPE wrbtr,
+
+         END OF ty_ui_item.
+
+
+
+  "========== VARIABLES ==========
+
+  DATA: lv_action      TYPE string,
+
+        gv_active_page TYPE string,
+
+        lv_inv_date    TYPE dats,
+
+        lv_pstng_date  TYPE dats,
+
+        lv_bsl_date    TYPE dats,
+
+        lv_ref_doc_no  TYPE xblnr1,
+
+        lv_gross_amt   TYPE wrbtr,
+
+        lv_tax_amt     TYPE wrbtr,
+
+        lv_calc_tax    TYPE xfeld,
+
+        lv_pmt_block   TYPE dzlspr,
+
+        lv_header_txt  TYPE string,
+
+        lv_items_json  TYPE string,
+
+        lv_attachments TYPE string,
+
+        lv_comp_code   TYPE bukrs,
+
+        lv_success     TYPE abap_bool,
+
+        lv_processed   TYPE abap_bool,
+
+        lv_docnum      TYPE belnr_d,
+
+        lv_fyear       TYPE gjahr,
+
+        lv_errmsg      TYPE string,
+
+        lt_items_parsed TYPE tt_items_parsed.
+
+
+
+  " [DIPINDAHKAN KE SINI] Variable tambahan untuk W/Tax
+
+  DATA: lv_withtax_json  TYPE string,
+
+        lt_wtax_parsed   TYPE tt_wtax_parsed,
+
+        ls_withtaxdata   TYPE bapi_incinv_create_withtax,
+
+        lt_withtaxdata   TYPE TABLE OF bapi_incinv_create_withtax.
+
+
+
+  DATA: lv_vendor      TYPE lifnr,
+
+        lv_name1       TYPE name1_gp,
+
+        lv_banka       TYPE banka,
+
+        lv_bankn       TYPE bankn,
+
+        lv_koinh       TYPE lfbk-koinh,
+
+        lt_ui_items    TYPE TABLE OF ty_ui_item,
+
+        ls_ui_item     TYPE ty_ui_item,
+
+        lv_items_tot   TYPE wrbtr VALUE 0,
+
+        lv_nett        TYPE wrbtr,
+
+        lv_items_str   TYPE c LENGTH 30,
+
+        lv_tax_str     TYPE c LENGTH 30,
+
+        lv_nett_str    TYPE c LENGTH 30,
+
+        lv_invdt_str   TYPE string,
+
+        lv_pstngdt_str TYPE string,
+
+        lv_duedt_str   TYPE string.
+
+
+
+  "========== RETRIEVE INPUT ==========
+
+  lv_action       = request->get_form_field( 'action' ).
+
+  lv_inv_date     = request->get_form_field( 'inv_date' ).
+
+  lv_pstng_date   = request->get_form_field( 'pstng_date' ).
+
+  lv_ref_doc_no   = request->get_form_field( 'ref_doc_no' ).
+
+  lv_gross_amt    = request->get_form_field( 'gross_amount' ).
+
+  lv_tax_amt      = request->get_form_field( 'tax_amount' ).
+
+  lv_calc_tax     = request->get_form_field( 'calc_tax_ind' ).
+
+  lv_pmt_block    = request->get_form_field( 'pmt_block' ).
+
+  lv_header_txt   = request->get_form_field( 'header_txt' ).
+
+  lv_items_json   = request->get_form_field( 'items_json' ).
+
+  lv_withtax_json = request->get_form_field( 'withtax_json' ).
+
+
+
+  " Baseline Date fallback
+
+  lv_bsl_date = request->get_form_field( 'bsl_date' ).
+
+  IF lv_bsl_date IS INITIAL.
+
+    lv_bsl_date = lv_inv_date.
+
+  ENDIF.
+
+
+
+  "========== FLOW LOGIC - PARK INVOICE ==========
+
+  IF lv_action = 'save'.
+
+
+
+    lv_processed = abap_true.
+
+
+
+    "---------- Validasi dasar ----------
+
+    IF lv_inv_date IS INITIAL.
+
+      lv_success = abap_false.
+
+      lv_errmsg  = 'Tanggal Invoice wajib diisi.'.
+
+    ELSEIF lv_ref_doc_no IS INITIAL.
+
+      lv_success = abap_false.
+
+      lv_errmsg  = 'Nomor Referensi / Nomor Faktur wajib diisi (digunakan untuk deteksi double invoice).'.
+
+    ELSEIF lv_gross_amt IS INITIAL.
+
+      lv_success = abap_false.
+
+      lv_errmsg  = 'Gross Amount wajib diisi.'.
+
+    ELSEIF lv_items_json IS INITIAL.
+
+      lv_success = abap_false.
+
+      lv_errmsg  = 'Tidak ada item GR yang dipilih. Silakan kembali dan centang minimal satu baris.'.
+
+    ELSE.
+
+
+
+      "---------- Parse JSON items ----------
+
+      DATA: lv_json_work  TYPE string,
+
+            lv_obj_str    TYPE string,
+
+            lv_key        TYPE string,
+
+            lv_val        TYPE string,
+
+            lv_pos_start  TYPE i,
+
+            lv_pos_end    TYPE i,
+
+            lv_pos_colon  TYPE i,
+
+            ls_item_p     TYPE ty_item_parsed,
+
+            lt_pairs      TYPE TABLE OF string,
+
+            lv_pair       TYPE string.
+
+
+
+      lv_json_work = lv_items_json.
+
+      REPLACE FIRST OCCURRENCE OF '[' IN lv_json_work WITH ''.
+
+      REPLACE ALL  OCCURRENCES  OF ']' IN lv_json_work WITH ''.
+
+      CONDENSE lv_json_work.
+
+
+
+      WHILE lv_json_work IS NOT INITIAL.
+
+        lv_pos_start = find( val = lv_json_work sub = '{' ).
+
+        lv_pos_end   = find( val = lv_json_work sub = '}' ).
+
+
+
+        IF lv_pos_start < 0 OR lv_pos_end < 0.
+
+          EXIT.
+
+        ENDIF.
+
+
+
+        lv_obj_str = substring( val = lv_json_work off = lv_pos_start + 1
+
+                                len = lv_pos_end - lv_pos_start - 1 ).
+
+
+
+        lv_json_work = substring( val = lv_json_work
+
+                                  off = lv_pos_end + 1
+
+                                  len = strlen( lv_json_work ) - lv_pos_end - 1 ).
+
+
+
+        CLEAR ls_item_p.
+
+        CLEAR lt_pairs.
+
+        SPLIT lv_obj_str AT ',' INTO TABLE lt_pairs.
+
+
+
+        LOOP AT lt_pairs INTO lv_pair.
+
+          lv_pos_colon = find( val = lv_pair sub = ':' ).
+
+          IF lv_pos_colon < 0. CONTINUE. ENDIF.
+
+
+
+          lv_key = substring( val = lv_pair off = 0 len = lv_pos_colon ).
+
+          lv_val = substring( val = lv_pair off = lv_pos_colon + 1
+
+                              len = strlen( lv_pair ) - lv_pos_colon - 1 ).
+
+
+
+          REPLACE ALL OCCURRENCES OF '"' IN lv_key WITH ''.
+
+          REPLACE ALL OCCURRENCES OF '"' IN lv_val WITH ''.
+
+          CONDENSE lv_key.
+
+          CONDENSE lv_val.
+
+
+
+          CASE lv_key.
+
+            WHEN 'invoice_doc_item'. ls_item_p-invoice_doc_item = lv_val.
+
+            WHEN 'po_number'.        ls_item_p-po_number        = lv_val.
+
+            WHEN 'po_item'.          ls_item_p-po_item          = lv_val.
+
+            WHEN 'bukrs'.            ls_item_p-bukrs            = lv_val.
+
+            WHEN 'quantity'.         ls_item_p-quantity         = lv_val.
+
+            WHEN 'po_unit'.          ls_item_p-po_unit          = lv_val.
+
+            WHEN 'item_amount'.      ls_item_p-item_amount      = lv_val.
+
+            WHEN 'ref_doc'.          ls_item_p-ref_doc          = lv_val.
+
+            WHEN 'ref_doc_year'.     ls_item_p-ref_doc_year     = lv_val.
+
+            WHEN 'ref_doc_it'.       ls_item_p-ref_doc_it       = lv_val.
+
+            WHEN 'tax_code'.         ls_item_p-tax_code         = lv_val.
+
+          ENDCASE.
+
+        ENDLOOP.
+
+
+
+        IF ls_item_p-po_number IS NOT INITIAL.
+
+          APPEND ls_item_p TO lt_items_parsed.
+
+          IF lv_comp_code IS INITIAL.
+
+            lv_comp_code = ls_item_p-bukrs.
+
+          ENDIF.
+
+        ENDIF.
+
+
+
+      ENDWHILE.
+
+
+
+      IF lt_items_parsed IS INITIAL.
+
+        lv_success = abap_false.
+
+        lv_errmsg  = 'Gagal mem-parse data item. Tidak ada item valid yang ditemukan.'.
+
+      ELSE.
+
+
+
+        "========== AMBIL LAMPIRAN DARI ZAPP_ATTACHMENT ==========
+
+        TYPES: BEGIN OF ty_po,
+
+                 ebeln TYPE ebeln,
+
+               END OF ty_po.
+
+        DATA: lt_po_list TYPE TABLE OF ty_po,
+
+              ls_po_list TYPE ty_po.
+
+
+
+        DATA: lr_ref_doc TYPE RANGE OF ebeln,
+
+              ls_ref_doc LIKE LINE OF lr_ref_doc.
+
+
+
+        LOOP AT lt_items_parsed ASSIGNING FIELD-SYMBOL(<ls_pitem>).
+
+          IF <ls_pitem>-po_number IS NOT INITIAL.
+
+            ls_po_list-ebeln = <ls_pitem>-po_number.
+
+            CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+
+              EXPORTING input  = ls_po_list-ebeln
+
+              IMPORTING output = ls_po_list-ebeln.
+
+            COLLECT ls_po_list INTO lt_po_list.
+
+          ENDIF.
+
+        ENDLOOP.
+
+
+
+        LOOP AT lt_po_list INTO ls_po_list.
+
+          CLEAR ls_ref_doc.
+
+          ls_ref_doc-sign   = 'I'.
+
+          ls_ref_doc-option = 'EQ'.
+
+          ls_ref_doc-low    = ls_po_list-ebeln.
+
+          APPEND ls_ref_doc TO lr_ref_doc.
+
+        ENDLOOP.
+
+
+
+        CLEAR lv_attachments.
+
+        lv_attachments = '['.
+
+
+
+        " Deklarasi lt_db_attach di scope yang lebih luas agar bisa di UPDATE nanti
+
+        DATA: lt_db_attach TYPE TABLE OF zapp_attachment.
+
+
+
+        IF lr_ref_doc IS NOT INITIAL.
+
+          SELECT * FROM zapp_attachment
+
+            WHERE ref_doc IN @lr_ref_doc
+
+            INTO TABLE @lt_db_attach.
+
+
+
+          " =================================================================
+
+          " PENGKONDISIAN FILTERING GAMBAR TERBARU
+
+          " =================================================================
+
+          IF lt_db_attach[] IS NOT INITIAL.
+
+            " Urutkan berdasarkan tanggal upload dan UUID agar yang terbaru berada di atas
+
+            SORT lt_db_attach BY ref_doc doc_type upload_date DESCENDING attach_id DESCENDING.
+
+
+
+            " Hapus duplikat untuk memastikan hanya 1 gambar per tipe yang diproses untuk sesi ini
+
+            DELETE ADJACENT DUPLICATES FROM lt_db_attach COMPARING ref_doc doc_type.
+
+          ENDIF.
+
+          " =================================================================
+
+
+
+          DATA(lv_first_att) = abap_true.
+
+          LOOP AT lt_db_attach INTO DATA(ls_db_attach).
+
+            IF lv_first_att = abap_true.
+
+              lv_first_att = abap_false.
+
+            ELSE.
+
+              lv_attachments = lv_attachments && ','.
+
+            ENDIF.
+
+
+
+            DATA(lv_b64) = cl_http_utility=>encode_x_base64( unencoded = ls_db_attach-file_content ).
+
+            DATA(lv_fname) = ls_db_attach-file_name.
+
+            REPLACE ALL OCCURRENCES OF '"' IN lv_fname WITH '\"'.
+
+
+
+            DATA(lv_mtype) = ls_db_attach-file_type.
+
+            IF lv_mtype IS INITIAL. lv_mtype = 'image/jpeg'. ENDIF.
+
+
+
+            lv_attachments = lv_attachments &&
+
+              `{"type":"` && ls_db_attach-doc_type && `",` &&
+
+              `"name":"` && lv_fname && `",` &&
+
+              `"mime":"` && lv_mtype && `",` &&
+
+              `"content":"` && lv_b64 && `"}`.
+
+          ENDLOOP.
+
+        ENDIF.
+
+        lv_attachments = lv_attachments && ']'.
+
+
+
+        "---------- Bangun HEADERDATA ----------
+
+        DATA: ls_headerdata   TYPE bapi_incinv_create_header,
+
+              ls_itemdata     TYPE bapi_incinv_create_item,
+
+              lt_itemdata     TYPE TABLE OF bapi_incinv_create_item,
+
+              ls_taxdata      TYPE bapi_incinv_create_tax,
+
+              lt_taxdata      TYPE TABLE OF bapi_incinv_create_tax,
+
+              lt_return       TYPE bapiret2_t,
+
+              lv_invdocnumber TYPE belnr_d,
+
+              lv_fiscalyear   TYPE gjahr,
+
+              lv_has_error    TYPE abap_bool,
+
+              lv_msg          TYPE string.
+
+
+
+        ls_headerdata-invoice_ind  = 'X'.
+
+        ls_headerdata-doc_type     = 'RE'.
+
+        ls_headerdata-doc_date     = lv_inv_date.
+
+        ls_headerdata-pstng_date   = lv_pstng_date.
+
+        ls_headerdata-comp_code    = lv_comp_code.
+
+        ls_headerdata-gross_amount = lv_gross_amt.
+
+
+
+        DATA lv_waers TYPE ekko-waers.
+
+        lv_waers = request->get_form_field( 'waers' ).
+
+        IF lv_waers IS INITIAL. lv_waers = 'IDR'. ENDIF.
+
+        ls_headerdata-currency     = lv_waers.
+
+        ls_headerdata-calc_tax_ind = lv_calc_tax.
+
+        ls_headerdata-ref_doc_no   = lv_ref_doc_no.
+
+        ls_headerdata-header_txt   = lv_header_txt.
+
+        ls_headerdata-bline_date   = lv_bsl_date.
+
+
+
+        "---------- Bangun TAXDATA ----------
+
+        IF lv_calc_tax IS INITIAL AND lv_tax_amt IS NOT INITIAL AND lv_tax_amt <> '0'.
+
+          READ TABLE lt_items_parsed INDEX 1 INTO DATA(ls_first_item).
+
+          IF sy-subrc = 0.
+
+            ls_taxdata-tax_code = ls_first_item-tax_code.
+
+          ENDIF.
+
+          ls_taxdata-tax_amount      = lv_tax_amt.
+
+          ls_taxdata-tax_base_amount = lv_gross_amt - lv_tax_amt.
+
+          APPEND ls_taxdata TO lt_taxdata.
+
+        ENDIF.
+
+
+
+        "---------- Bangun ITEMDATA ----------
+
+        LOOP AT lt_items_parsed ASSIGNING FIELD-SYMBOL(<ls_ip>).
+
+          CLEAR ls_itemdata.
+
+          ls_itemdata-invoice_doc_item = <ls_ip>-invoice_doc_item.
+
+          ls_itemdata-po_number        = <ls_ip>-po_number.
+
+          ls_itemdata-po_item          = <ls_ip>-po_item.
+
+          ls_itemdata-quantity         = <ls_ip>-quantity.
+
+          ls_itemdata-po_unit          = <ls_ip>-po_unit.
+
+          ls_itemdata-item_amount      = <ls_ip>-item_amount.
+
+          ls_itemdata-ref_doc          = <ls_ip>-ref_doc.
+
+          ls_itemdata-ref_doc_year     = <ls_ip>-ref_doc_year.
+
+          ls_itemdata-ref_doc_it       = <ls_ip>-ref_doc_it.
+
+
+
+          IF <ls_ip>-tax_code IS NOT INITIAL.
+
+            ls_itemdata-tax_code       = <ls_ip>-tax_code.
+
+          ENDIF.
+
+          APPEND ls_itemdata TO lt_itemdata.
+
+        ENDLOOP.
+
+
+
+        "---------- Bangun WITHTAXDATA ----------
+
+        IF lv_withtax_json IS NOT INITIAL AND lv_withtax_json <> '[]'.
+
+          " Parse JSON ke Internal Table
+
+          /ui2/cl_json=>deserialize(
+
+            EXPORTING json = lv_withtax_json
+
+            CHANGING  data = lt_wtax_parsed
+
+          ).
+
+
+
+          " Pindahkan ke struktur standar BAPI
+
+          LOOP AT lt_wtax_parsed ASSIGNING FIELD-SYMBOL(<ls_w>).
+
+            CLEAR ls_withtaxdata.
+
+
+
+            " WAJIB: SPLIT_KEY harus '000001' agar SAP mau menerima baris pajaknya
+
+            ls_withtaxdata-split_key   = '000001'.
+
+            ls_withtaxdata-wi_tax_type = <ls_w>-wtax_type.
+
+            ls_withtaxdata-wi_tax_code = <ls_w>-wtax_code.
+
+            ls_withtaxdata-wi_tax_base = <ls_w>-wtax_base.
+
+            ls_withtaxdata-wi_tax_amt  = <ls_w>-wtax_amount.
+
+
+
+            APPEND ls_withtaxdata TO lt_withtaxdata.
+
+          ENDLOOP.
+
+        ENDIF.
+
+
+
+        "---------- Panggil BAPI ----------
+
+        CALL FUNCTION 'BAPI_INCOMINGINVOICE_PARK'
+
+          EXPORTING
+
+            headerdata       = ls_headerdata
+
+          IMPORTING
+
+            invoicedocnumber = lv_invdocnumber
+
+            fiscalyear       = lv_fiscalyear
+
+          TABLES
+
+            itemdata         = lt_itemdata
+
+            taxdata          = lt_taxdata
+
+            withtaxdata      = lt_withtaxdata  " <--- PARAMETER W/TAX DIBERIKAN DI SINI
+
+            return           = lt_return.
+
+
+
+        "---------- Cek Return Messages ----------
+
+        LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<ls_ret>) WHERE type = 'E' OR type = 'A'.
+
+          lv_has_error = abap_true.
+
+          IF lv_msg IS INITIAL. lv_msg = <ls_ret>-message. ELSE. lv_msg = lv_msg && ' | ' && <ls_ret>-message. ENDIF.
+
+        ENDLOOP.
+
+
+
+        IF lv_has_error = abap_false.
+
+          CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = 'X'.
+
+          lv_success = abap_true.
+
+          lv_docnum  = lv_invdocnumber.
+
+          lv_fyear   = lv_fiscalyear.
+
+
+
+          " ====================================================================
+
+          " [CRITICAL FIX] UPDATE REF_DOC LAMPIRAN MENJADI NOMOR INVOICE
+
+          " Mentransfer kepemilikan dokumen dari PO ke Invoice agar tidak duplikat
+
+          " saat PO yang sama di-park di masa depan.
+
+          " ====================================================================
+
+          IF lt_db_attach[] IS NOT INITIAL.
+
+            LOOP AT lt_db_attach ASSIGNING FIELD-SYMBOL(<ls_upd_att>).
+
+              <ls_upd_att>-ref_doc = lv_docnum.
+
+            ENDLOOP.
+
+            UPDATE zapp_attachment FROM TABLE lt_db_attach.
+
+            COMMIT WORK AND WAIT.
+
+          ENDIF.
+
+          " ====================================================================
+
+
+
+          "====================================================================
+
+          " FETCH DATA UNTUK UI DOCUMENT DETAIL SETELAH PARK SUCCESS
+
+          "====================================================================
+
+
+
+          " 1. Ambil data Vendor dan Bank
+
+          READ TABLE lt_items_parsed INTO DATA(ls_first_p) INDEX 1.
+
+          IF sy-subrc = 0.
+
+            SELECT SINGLE lifnr FROM ekko INTO lv_vendor WHERE ebeln = ls_first_p-po_number.
+
+            IF sy-subrc = 0.
+
+              SELECT SINGLE name1 FROM lfa1 INTO lv_name1 WHERE lifnr = lv_vendor.
+
+
+
+              SELECT SINGLE b~banka, k~bankn, k~koinh
+
+                INTO (@lv_banka, @lv_bankn, @lv_koinh)
+
+                FROM lfbk AS k INNER JOIN bnka AS b ON k~banks = b~banks AND k~bankl = b~bankl
+
+                WHERE k~lifnr = @lv_vendor.
+
+            ENDIF.
+
+          ENDIF.
+
+
+
+          SHIFT lv_vendor LEFT DELETING LEADING '0'.
+
+          IF lv_banka IS INITIAL.
+
+            lv_banka = 'No bank data'.
+
+            lv_bankn = '-'.
+
+            lv_koinh = '-'.
+
+          ENDIF.
+
+
+
+          " 2. Susun Data Material Items UI
+
+          DATA lv_counter TYPE i VALUE 1.
+
+          LOOP AT lt_items_parsed ASSIGNING FIELD-SYMBOL(<ls_parsed>).
+
+            CLEAR ls_ui_item.
+
+            ls_ui_item-itm = |{ lv_counter ALIGN = RIGHT WIDTH = 6 PAD = '0' }|.
+
+            ls_ui_item-po_number = <ls_parsed>-po_number.
+
+            ls_ui_item-value_num = <ls_parsed>-item_amount.
+
+
+
+            " Fetch Material Number
+
+            SELECT SINGLE matnr FROM ekpo INTO ls_ui_item-material
+
+              WHERE ebeln = <ls_parsed>-po_number AND ebelp = <ls_parsed>-po_item.
+
+            SHIFT ls_ui_item-material LEFT DELETING LEADING '0'.
+
+
+
+            " Format String currency
+
+            IF lv_waers = 'IDR'.
+
+              ls_ui_item-value_num = ls_ui_item-value_num * 100.
+
+              WRITE ls_ui_item-value_num TO ls_ui_item-value_str. " IDR tampil normal tanpa CURRENCY
+
+            ELSE.
+
+              WRITE ls_ui_item-value_num TO ls_ui_item-value_str CURRENCY lv_waers. " Mata uang asing diformat SAP
+
+            ENDIF.
+
+            CONDENSE ls_ui_item-value_str.
+
+
+
+            lv_items_tot = lv_items_tot + ls_ui_item-value_num.
+
+            APPEND ls_ui_item TO lt_ui_items.
+
+            lv_counter = lv_counter + 1.
+
+          ENDLOOP.
+
+
+
+          " 3. Format Tanggal
+
+          lv_invdt_str   = lv_inv_date+6(2) && '.' && lv_inv_date+4(2) && '.' && lv_inv_date(4).
+
+          lv_pstngdt_str = lv_pstng_date+6(2) && '.' && lv_pstng_date+4(2) && '.' && lv_pstng_date(4).
+
+          lv_duedt_str   = lv_bsl_date+6(2) && '.' && lv_bsl_date+4(2) && '.' && lv_bsl_date(4).
+
+
+
+          " 4. Financial Summary
+
+          DATA lv_tax_disp TYPE wrbtr.
+
+          lv_tax_disp = lv_tax_amt.
+
+
+
+          IF lv_waers = 'IDR'.
+
+            lv_tax_disp = lv_tax_disp * 100.
+
+          ENDIF.
+
+
+
+          lv_nett = lv_items_tot + lv_tax_disp.
+
+
+
+          IF lv_waers = 'IDR'.
+
+            WRITE lv_items_tot TO lv_items_str.
+
+            WRITE lv_tax_disp  TO lv_tax_str.
+
+            WRITE lv_nett      TO lv_nett_str.
+
+          ELSE.
+
+            WRITE lv_items_tot TO lv_items_str CURRENCY lv_waers.
+
+            WRITE lv_tax_disp  TO lv_tax_str CURRENCY lv_waers.
+
+            WRITE lv_nett      TO lv_nett_str CURRENCY lv_waers.
+
+          ENDIF.
+
+
+
+          CONDENSE lv_items_str.
+
+          CONDENSE lv_tax_str.
+
+          CONDENSE lv_nett_str.
+
+
+
+        ELSE.
+
+          CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+
+          lv_success = abap_false.
+
+          lv_errmsg  = lv_msg.
+
+        ENDIF.
+
+
+
+      ENDIF.
+
+    ENDIF.
+
+
+
+  ENDIF.
+
+
+
+  "========== SIDEBAR VARIABLES ==========
+
+  DATA: lv_role TYPE string.
+
+        lv_role = request->get_form_field( 'role' ).
+
+        gv_active_page = ''.
+
+%>
+
+
+
+<htmlb:content design="design2003">
+
+<htmlb:page title="AP Invoice - Park Invoice">
+
+
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+<link rel="icon" type="image/png" href="logokmi.png">
+
+
+
+<style>
+
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  element.style { margin-left: 0px; margin-right: 0px; margin-top: 0px; margin-bottom: 0px; }
+
+
+
+  body {
+
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+    background: #f8fafc !important;
+
+    color: #1e293b !important;
+
+    height: 100vh;
+
+    overflow: hidden;
+
+    margin: 0 !important;
+
+    padding: 0 !important;
+
+  }
+
+
+
+  .app-layout { display: flex; height: 100vh; overflow: hidden; }
+
+  .app-main { flex: 1; overflow-y: auto; height: 100vh; padding: 0; background: #f8fafc; }
+
+  .app-content { padding: 24px 32px; }
+
+
+
+  .detail-card { background: #ffffff; border-radius: 10px; border: 1px solid #e2e8f0; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+
+  .section-box { background: #f8fafc; border-radius: 8px; padding: 18px; }
+
+  .section-title { font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+
+
+
+  .data-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+
+  .data-label { color: #64748b; }
+
+  .data-value { color: #1e293b; font-weight: 500; }
+
+  .data-value.red { color: #dc2626; font-weight: 600; }
+
+  .data-value.green { color: #059669; font-weight: 600; }
+
+
+
+  .sap-table { width: 100%; border-collapse: collapse; text-align: left; }
+
+  .sap-table th { padding: 8px 12px; font-size: 12px; font-weight: 600; color: #64748b; border-bottom: 1px solid #e2e8f0; }
+
+  .sap-table td { padding: 10px 12px; font-size: 13px; color: #334155; border-bottom: 1px solid #f1f5f9; }
+
+  .sap-table tr:last-child td { border-bottom: none; }
+
+
+
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; border-radius: 6px; cursor: pointer; transition: all 0.15s; }
+
+  .btn-primary { background: #059669; color: #ffffff; }
+
+  .btn-primary:hover { background: #047857; }
+
+
+
+  .mono { font-family: 'SF Mono', monospace; }
+
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .animate-in { animation: fadeIn 0.4s ease-out; }
+
+</style>
+
+
+
+<script type="application/json" id="rawAttachments">
+
+  <%= lv_attachments %>
+
+</script>
+
+
+
+<div id="imgModal" class="fixed inset-0 z-[9999] hidden bg-black/85 backdrop-blur-sm transition-opacity duration-300">
+
+  <div class="absolute top-4 right-6 flex gap-3 z-50">
+
+    <button onclick="zoomIn()" class="bg-white/10 hover:bg-white/25 text-white p-2.5 rounded-lg backdrop-blur" title="Zoom In">
+
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21"
+
+x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+
+    </button>
+
+    <button onclick="zoomOut()" class="bg-white/10 hover:bg-white/25 text-white p-2.5 rounded-lg backdrop-blur" title="Zoom Out">
+
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21"
+
+x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+
+    </button>
+
+    <button onclick="closeModal()" class="bg-red-500/80 hover:bg-red-600 text-white p-2.5 rounded-lg backdrop-blur ml-4" title="Close Modal">
+
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6"
+
+x2="18" y2="18"></line></svg>
+
+    </button>
+
+  </div>
+
+  <div class="overflow-auto w-full h-full flex items-center justify-center p-8" id="modalScrollArea">
+
+     <img id="modalImage" class="max-w-none transition-transform duration-200 shadow-2xl" style="transform: scale(1); transform-origin: center;" />
+
+  </div>
+
+</div>
+
+
+
+<div class="app-layout">
+
+  <%@include file="sidebar.htm" %>
+
+
+
+  <main class="app-main">
+
+    <div class="app-content">
+
+
+
+  <% IF lv_processed = abap_true AND lv_success = abap_true. %>
+
+
+
+  <div class="detail-card animate-in">
+
+    <div class="flex justify-between items-end border-b border-slate-200 pb-4 mb-6">
+
+      <div>
+
+        <h2 class="text-xl font-bold text-slate-800">
+
+          Document Detail: <span class="text-emerald-600">INV-<%= lv_docnum %></span> <span class="text-slate-400 font-medium">/ Year: <%= lv_fyear %></span>
+
+        </h2>
+
+      </div>
+
+      <div class="text-sm font-medium text-slate-500">
+
+        Parked: <%= lv_pstngdt_str %>
+
+      </div>
+
+    </div>
+
+
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+
+      <div class="section-box">
+
+        <div class="section-title">Vendor Information</div>
+
+        <div class="text-base font-bold text-slate-800 mb-1"><%= lv_vendor %></div>
+
+        <div class="text-sm text-slate-600"><%= lv_name1 %></div>
+
+      </div>
+
+
+
+      <div class="section-box">
+
+        <div class="section-title">Payment Destination</div>
+
+        <div class="data-row"><span class="data-label">Bank:</span><span class="data-value"><%= lv_banka %></span></div>
+
+        <div class="data-row"><span class="data-label">Acct:</span><span class="data-value"><%= lv_bankn %></span></div>
+
+        <div class="data-row mb-0"><span class="data-label">Name:</span><span class="data-value"><%= lv_koinh %></span></div>
+
+      </div>
+
+
+
+      <div class="section-box">
+
+        <div class="section-title">Dates & Deadlines</div>
+
+        <div class="data-row"><span class="data-label">Invoice Date:</span><span class="data-value"><%= lv_invdt_str %></span></div>
+
+        <div class="data-row"><span class="data-label">Posting Date:</span><span class="data-value"><%= lv_pstngdt_str %></span></div>
+
+        <div class="data-row mb-0"><span class="data-label">Due Date:</span><span class="data-value red"><%= lv_duedt_str %></span></div>
+
+      </div>
+
+
+
+      <div class="section-box">
+
+        <div class="section-title">Financial Summary (<%= lv_waers %>)</div>
+
+        <div class="data-row"><span class="data-label">Items Total:</span><span class="data-value"><%= lv_items_str %></span></div>
+
+        <div class="data-row"><span class="data-label">Tax Total:</span><span class="data-value">+ <%= lv_tax_str %></span></div>
+
+        <div class="data-row border-t border-slate-200 pt-2 mt-1"><span class="data-label text-slate-800 font-semibold">System Calc:</span><span class="data-value"><%= lv_nett_str %></span></div>
+
+        <div class="data-row mb-0"><span class="data-label text-emerald-600 font-bold">Nett:</span><span class="data-value green"><%= lv_nett_str %></span></div>
+
+      </div>
+
+    </div>
+
+
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+      <div>
+
+        <div class="text-xs font-bold text-slate-700 mb-3 tracking-wide">MATERIAL ITEMS (RSEG)</div>
+
+        <div class="bg-slate-50 rounded-lg p-2">
+
+          <table class="sap-table">
+
+            <thead>
+
+              <tr>
+
+                <th width="10%">Itm</th>
+
+                <th width="30%">PO Number</th>
+
+                <th width="30%">Material</th>
+
+                <th width="30%" style="text-align: right;">Value</th>
+
+              </tr>
+
+            </thead>
+
+            <tbody>
+
+              <% LOOP AT lt_ui_items INTO ls_ui_item. %>
+
+              <tr>
+
+                <td><%= ls_ui_item-itm %></td>
+
+                <td class="text-indigo-600 font-medium"><%= ls_ui_item-po_number %></td>
+
+                <td class="mono text-xs"><%= ls_ui_item-material %></td>
+
+                <td align="right" class="font-semibold text-slate-800"><%= ls_ui_item-value_str %></td>
+
+              </tr>
+
+              <% ENDLOOP. %>
+
+            </tbody>
+
+          </table>
+
+        </div>
+
+      </div>
+
+
+
+      <div>
+
+        <div class="text-xs font-bold text-slate-700 mb-3 tracking-wide">G/L & COST CENTER (RBCO)</div>
+
+        <div class="bg-slate-50 rounded-lg p-2 min-h-[100px] flex items-center justify-center">
+
+          <span class="text-slate-400 text-sm font-medium">No G/L items available</span>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <div class="mt-8 pt-6 border-t border-slate-200 flex gap-4">
+
+        <a href="index.htm?action=list_gr" class="btn btn-primary">Back to List</a>
+
+    </div>
+
+  </div>
+
+  <div class="detail-card animate-in" style="animation-delay: 0.1s;">
+
+    <h2 class="text-base font-bold text-slate-800 mb-4 border-b border-slate-100 pb-2">Attached Documents</h2>
+
+    <div id="attachments-container" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+    </div>
+
+  </div>
+
+  <script>
+
+    let currentScale = 1;
+
+    function openModal(src) {
+
+        document.getElementById('imgModal').classList.remove('hidden');
+
+        const img = document.getElementById('modalImage');
+
+        img.src = src;
+
+        currentScale = 1;
+
+        img.style.transform = `scale(${currentScale})`;
+
+    }
+
+    function closeModal() {
+
+        document.getElementById('imgModal').classList.add('hidden');
+
+        document.getElementById('modalImage').src = '';
+
+    }
+
+    function zoomIn() {
+
+        currentScale += 0.25;
+
+        document.getElementById('modalImage').style.transform = `scale(${currentScale})`;
+
+    }
+
+    function zoomOut() {
+
+        if(currentScale > 0.3) currentScale -= 0.25;
+
+        document.getElementById('modalImage').style.transform = `scale(${currentScale})`;
+
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+
+        var rawData = document.getElementById('rawAttachments').textContent.trim();
+
+        if (rawData) {
+
+            try {
+
+                var docs = JSON.parse(rawData);
+
+                var container = document.getElementById('attachments-container');
+
+                docs.forEach(function(doc) {
+
+                    var wrapper = document.createElement('div');
+
+                    wrapper.className = 'border border-slate-200 rounded-lg overflow-hidden flex flex-col bg-white hover:shadow-md transition-shadow';
+
+                    var header = document.createElement('div');
+
+                    header.className = 'bg-slate-50 px-3 py-2 border-b border-slate-200 font-semibold text-xs text-slate-700 flex justify-between items-center';
+
+                    var docTitle = doc.type;
+
+
+
+                    if(doc.type === 'INV') docTitle = '1. Dokumen Invoice';
+
+                    if(doc.type === 'PO')  docTitle = '2. Purchase Order';
+
+                    if(doc.type === 'GR')  docTitle = '3. Goods Receipt';
+
+                    if(doc.type === 'TAX') docTitle = '4. Faktur Pajak';
+
+
+
+                    header.innerHTML = `<span>${docTitle}</span><span class="font-normal text-slate-500 bg-white px-1.5 py-0.5 border border-slate-200 rounded truncate max-w-[120px]" title="${doc.name}">${doc.name}</span>`;
+
+                    wrapper.appendChild(header);
+
+
+
+                    var body = document.createElement('div');
+
+                    body.className = 'bg-slate-100 flex-1 p-2 flex items-center justify-center h-[250px] overflow-hidden relative group cursor-pointer';
+
+                    var fileSrc = "data:" + doc.mime + ";base64," + doc.content;
+
+                    if (doc.mime.includes('image')) {
+
+                        body.onclick = function() { openModal(fileSrc); };
+
+                        body.innerHTML = `<img src="${fileSrc}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" alt="${docTitle}"/>
+
+                                          <div class="absolute inset-0 bg-black/0 group-hover:bg-black/10 flex items-center justify-center transition-colors">
+
+                                            <span class="opacity-0 group-hover:opacity-100 bg-black/60 text-white text-xs py-1 px-3 rounded-full backdrop-blur transition-opacity">Click to Zoom</span>
+
+                                          </div>`;
+
+                    } else if (doc.mime.includes('pdf')) {
+
+                        body.innerHTML = `<object data="${fileSrc}" type="application/pdf" class="w-full h-full">
+
+                                            <p class="text-xs text-slate-500 p-4 text-center">Preview tidak didukung. <br/><a href="${fileSrc}" download="${doc.name}" class="text-emerald-600 font-semibold underline mt-2 inline-block">Download PDF</a></p>
+
+                                          </object>`;
+
+                    } else {
+
+                        body.innerHTML = `<a href="${fileSrc}" download="${doc.name}" class="text-emerald-600 font-semibold underline hover:text-emerald-800 text-sm">Download Document</a>`;
+
+                    }
+
+                    wrapper.appendChild(body);
+
+                    container.appendChild(wrapper);
+
+                });
+
+            } catch (e) {
+
+                console.error("Gagal mem-parsing lampiran JSON.", e);
+            }
+        }
+    });
+  </script>
+  <% ELSEIF lv_processed = abap_true AND lv_success = abap_false. %>
+  <div class="detail-card animate-in border-red-200">
+    <div class="bg-red-50 p-4 rounded-lg border border-red-100 mb-6">
+      <h2 class="text-red-800 font-bold text-lg mb-2">Parking Failed</h2>
+      <p class="text-red-600 text-sm"><%= lv_errmsg %></p>
+    </div>
+    <div class="flex gap-4 mt-4">
+      <a href="javascript:history.back()" class="btn bg-slate-200 text-slate-800 hover:bg-slate-300">Kembali</a>
+    </div>
+  </div>
+  <% ELSE. %>
+  <div class="detail-card animate-in">
+    <h2 class="text-lg font-bold text-slate-800 mb-2">Invalid Access</h2>
+    <p class="text-slate-600 text-sm mb-6">Halaman ini harus diakses melalui form submit invoice dari list PO Outstanding.</p>
+    <a href="index.htm?action=list_gr" class="btn btn-primary">Go to PO List</a>
+  </div>
+  <% ENDIF. %>
+    </div>
+  </main>
+</div>
+</htmlb:page>
+</htmlb:content>

@@ -1,0 +1,524 @@
+<%@page language="abap"%>
+<%
+* ======================================================================
+* 1. DATA DECLARATIONS & ROLE MANAGEMENT
+* ======================================================================
+  DATA: it_log TYPE TABLE OF zapp_log,
+        wa_log TYPE zapp_log,
+        lv_role TYPE string,
+        gv_active_page TYPE string.
+
+  lv_role = request->get_form_field( 'role' ).
+  IF lv_role IS INITIAL. lv_role = 'AP'. ENDIF.
+
+  gv_active_page = 'DASHBOARD'.
+
+* ======================================================================
+* 2. PRE-FETCH DATA MASTER & LOG (FILTER LATEST FLAG = 1)
+* ======================================================================
+  SELECT * FROM zapp_log INTO TABLE it_log
+    WHERE flag = 1
+    ORDER BY datum DESCENDING uzeit DESCENDING record DESCENDING.
+
+  DATA: lv_tabix       TYPE sytabix,
+        lv_latest_flag TYPE zapp_log-flag.
+
+  LOOP AT it_log INTO wa_log.
+    lv_tabix = sy-tabix.
+    CLEAR lv_latest_flag.
+
+    " Cek Flag Terbaru
+    SELECT flag FROM zapp_log INTO @lv_latest_flag
+      UP TO 1 ROWS
+      WHERE belnr = @wa_log-belnr AND gjahr = @wa_log-gjahr
+      ORDER BY record DESCENDING.
+    ENDSELECT.
+
+    " Hapus jika status terakhir BUKAN 1
+    IF lv_latest_flag <> 1.
+      DELETE it_log INDEX lv_tabix.
+    ENDIF.
+  ENDLOOP.
+
+  SORT it_log BY belnr gjahr record DESCENDING.
+  DELETE ADJACENT DUPLICATES FROM it_log COMPARING belnr gjahr.
+
+  DATA: it_parked_inv TYPE TABLE OF rbkp, wa_inv TYPE rbkp,
+        it_rseg TYPE TABLE OF rseg, wa_rseg TYPE rseg,
+        it_rbco TYPE TABLE OF rbco, wa_rbco TYPE rbco,
+        it_lfa1 TYPE TABLE OF lfa1, wa_lfa1 TYPE lfa1,
+        it_lfbk TYPE TABLE OF lfbk, wa_lfbk TYPE lfbk,
+        it_bnka TYPE TABLE OF bnka, wa_bnka TYPE bnka,
+        it_t052 TYPE TABLE OF t052, wa_t052 TYPE t052.
+
+  IF it_log IS NOT INITIAL.
+    SELECT * FROM rbkp INTO TABLE it_parked_inv FOR ALL ENTRIES IN it_log WHERE belnr = it_log-belnr AND gjahr = it_log-gjahr.
+    IF it_parked_inv IS NOT INITIAL.
+      SELECT * FROM rseg INTO TABLE it_rseg FOR ALL ENTRIES IN it_parked_inv WHERE belnr = it_parked_inv-belnr AND gjahr = it_parked_inv-gjahr.
+      SELECT * FROM rbco INTO TABLE it_rbco FOR ALL ENTRIES IN it_parked_inv WHERE belnr = it_parked_inv-belnr AND gjahr = it_parked_inv-gjahr.
+      SELECT * FROM lfa1 INTO TABLE it_lfa1 FOR ALL ENTRIES IN it_parked_inv WHERE lifnr = it_parked_inv-lifnr.
+      SELECT * FROM lfbk INTO TABLE it_lfbk FOR ALL ENTRIES IN it_parked_inv WHERE lifnr = it_parked_inv-lifnr.
+      IF it_lfbk IS NOT INITIAL.
+        SELECT * FROM bnka INTO TABLE it_bnka FOR ALL ENTRIES IN it_lfbk WHERE banks = it_lfbk-banks AND bankl = it_lfbk-bankl.
+      ENDIF.
+      SELECT * FROM t052 INTO TABLE it_t052 FOR ALL ENTRIES IN it_parked_inv WHERE zterm = it_parked_inv-zterm.
+    ENDIF.
+  ENDIF.
+
+* ======================================================================
+* 3. DASHBOARD WIDGET CALCULATIONS
+* ======================================================================
+  DATA: lv_dash_total_appr TYPE i,
+        lv_dash_today_appr TYPE i,
+        lv_dash_total_val  TYPE rbkp-rmwwr,
+        lv_dash_tot_str    TYPE c LENGTH 30.
+
+  DESCRIBE TABLE it_log LINES lv_dash_total_appr.
+
+  LOOP AT it_log INTO DATA(wa_dash_log).
+    IF wa_dash_log-datum = sy-datum.
+      lv_dash_today_appr = lv_dash_today_appr + 1.
+    ENDIF.
+
+    READ TABLE it_parked_inv INTO DATA(wa_dash_inv) WITH KEY belnr = wa_dash_log-belnr gjahr = wa_dash_log-gjahr.
+    IF sy-subrc = 0.
+      lv_dash_total_val = lv_dash_total_val + wa_dash_inv-rmwwr.
+    ENDIF.
+  ENDLOOP.
+
+  WRITE lv_dash_total_val TO lv_dash_tot_str CURRENCY 'IDR'.
+  CONDENSE lv_dash_tot_str.
+  IF lv_dash_tot_str IS INITIAL.
+    lv_dash_tot_str = '0,00'.
+  ENDIF.
+
+  DATA: lv_vendor TYPE string, lv_bankn TYPE string, lv_banka TYPE string, lv_koinh TYPE string, lv_deadline TYPE sydatum,
+        lv_tot_item TYPE rbkp-rmwwr, lv_tot_calc TYPE rbkp-rmwwr, lv_selisih TYPE rbkp-rmwwr,
+        lv_str_rmwwr TYPE c LENGTH 30, lv_str_calc TYPE c LENGTH 30, lv_str_sel TYPE c LENGTH 30,
+        lv_str_rseg TYPE c LENGTH 30, lv_str_rbco TYPE c LENGTH 30, lv_str_tax TYPE c LENGTH 30,
+        lv_str_item TYPE c LENGTH 30, lv_str_beznk TYPE c LENGTH 30,
+        lv_is_deleted TYPE abap_bool, lv_is_invoice TYPE abap_bool.
+%>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIRO Approved History Log</title>
+    <link rel="icon" type="image/png" href="logokmi.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+    <script>
+        function toggleDetail(belnr) {
+            const detailRow = document.getElementById('detail_' + belnr);
+            const icon = document.getElementById('icon_' + belnr);
+            if (detailRow.classList.contains('hidden')) {
+                detailRow.classList.remove('hidden');
+                icon.style.transform = 'rotate(180deg)';
+            } else {
+                detailRow.classList.add('hidden');
+                icon.style.transform = 'rotate(0deg)';
+            }
+        }
+
+        let isAllExpanded = false;
+        function toggleAllDetails() {
+            isAllExpanded = !isAllExpanded;
+            const detailRows = document.querySelectorAll('tr[id^="detail_"]');
+            const icons = document.querySelectorAll('svg[id^="icon_"]');
+            const btn = document.getElementById('btnToggleAll');
+            detailRows.forEach(row => {
+                const mainRowId = row.id.replace('detail_', '');
+                const mainRow = document.querySelector(`tr[data-belnr="${mainRowId}"]`);
+                if (mainRow && mainRow.style.display !== "none") {
+                    if (isAllExpanded) row.classList.remove('hidden');
+                    else row.classList.add('hidden');
+                }
+            });
+            icons.forEach(icon => {
+                const mainRowId = icon.id.replace('icon_', '');
+                const mainRow = document.querySelector(`tr[data-belnr="${mainRowId}"]`);
+                if (mainRow && mainRow.style.display !== "none") {
+                    if (isAllExpanded) icon.style.transform = 'rotate(180deg)';
+                    else icon.style.transform = 'rotate(0deg)';
+                }
+            });
+            btn.innerHTML = isAllExpanded ?
+                '<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg> Collapse All' :
+                '<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg> Expand All';
+        }
+
+        function searchHistory() {
+            const input = document.getElementById("searchLog").value.toUpperCase();
+            const rows = document.querySelectorAll('tr.log-row');
+            rows.forEach(row => {
+                const searchData = row.getAttribute('data-search').toUpperCase();
+                const belnr = row.getAttribute('data-belnr');
+                const detailRow = document.getElementById('detail_' + belnr);
+
+                if (searchData.indexOf(input) > -1) {
+                    row.style.display = "";
+                } else {
+                    row.style.display = "none";
+                    if (detailRow && !detailRow.classList.contains('hidden')) {
+                        detailRow.classList.add('hidden');
+                        document.getElementById('icon_' + belnr).style.transform = 'rotate(0deg)';
+                    }
+                }
+            });
+        }
+
+        /* ─── Logout ─── */
+        function doLogout() {
+            if (!confirm('Yakin ingin logout?')) return;
+            sessionStorage.setItem('logged_out', '1');
+            fetch('/sap/public/bc/icf/logoff', { credentials: 'include' })
+                .finally(function() {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/sap/bc/bsp/sap/ZMIR7_BSP_AP/index.htm', true, 'logout', 'logout');
+                    xhr.onreadystatechange = function() {
+                        if (xhr.readyState === 4) {
+                            window.location.replace('/sap/bc/bsp/sap/ZMIR7_BSP_AP/index.htm');
+                        }
+                    };
+                    xhr.send();
+                });
+        }
+        window.addEventListener('pageshow', function(e) {
+            if (e.persisted && sessionStorage.getItem('logged_out') === '1') {
+                sessionStorage.removeItem('logged_out');
+                window.location.replace('/sap/public/bc/icf/logoff');
+            }
+        });
+    </script>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800 flex h-screen overflow-hidden antialiased">
+    <%@include file="sidebar.htm" %>
+    <main class="flex-1 overflow-y-auto h-screen p-8">
+        <div class="max-w-[95rem] mx-auto">
+
+            <div class="mb-8 flex flex-col md:flex-row md:justify-between md:items-end border-b border-slate-200 pb-4">
+                <div>
+                    <h1 class="text-3xl font-bold text-slate-800 tracking-tight">Riwayat Persetujuan MIRO</h1>
+                    <p class="text-slate-500 mt-1.5 text-sm font-medium">Rekaman historis seluruh faktur logistik (PO) yang telah disetujui (Approved Log)</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8">
+                <div class="bg-white rounded-xl border-t-4 border-t-indigo-500 border border-slate-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+                    <h3 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Total Dokumen Disetujui</h3>
+                    <div class="text-3xl font-extrabold text-slate-800 mb-1"><%= lv_dash_total_appr %> <span class="text-sm font-medium text-slate-400 ml-1">Faktur</span></div>
+                    <div class="text-xs text-slate-500">Akumulasi riwayat historis</div>
+                </div>
+
+                <div class="bg-emerald-50 rounded-xl border-t-4 border-t-emerald-500 border border-emerald-100 p-5 shadow-sm hover:shadow-md transition-shadow">
+                    <h3 class="text-xs font-bold text-emerald-700 uppercase tracking-wider mb-2">Disetujui Hari Ini</h3>
+                    <div class="text-3xl font-extrabold text-emerald-600 mb-1"><%= lv_dash_today_appr %> <span class="text-sm font-medium text-emerald-400 ml-1">Dokumen</span></div>
+                    <div class="text-xs text-emerald-600 font-medium flex items-center">
+                        <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Telah diposting
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow border border-slate-200 overflow-hidden">
+                <div class="p-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center flex-wrap gap-3">
+                    <div class="relative w-full md:w-96">
+                        <input type="text" id="searchLog" onkeyup="searchHistory()" placeholder="Cari No. Dokumen, Vendor, atau PIC..." class="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2
+focus:ring-blue-500 focus:border-blue-500 transition-colors">
+                        <svg class="w-4 h-4 text-slate-400 absolute left-3.5 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114
+0z"></path></svg>
+                    </div>
+                    <button type="button" onclick="toggleAllDetails()" id="btnToggleAll" class="w-full md:w-auto bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2 px-4 rounded-md shadow-sm transition-colors text-sm flex
+justify-center items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg> Expand Data
+                    </button>
+                </div>
+
+                <div class="overflow-x-auto w-full">
+                    <table class="w-full min-w-[1100px] text-left border-collapse">
+                        <thead>
+                            <tr class="bg-slate-800 text-slate-100 border-b border-slate-700 text-xs uppercase tracking-widest whitespace-nowrap">
+                                <th class="p-4 font-bold w-12 text-center">Det.</th>
+                                <th class="p-4 font-bold w-36">Waktu Eksekusi</th>
+                                <th class="p-4 font-bold w-36">No. Dokumen</th>
+                                <th class="p-4 font-bold">Vendor / Ref.</th>
+                                <th class="p-4 font-bold">Informasi Bank</th>
+                                <th class="p-4 font-bold text-center">Diperiksa Oleh</th>
+                                <th class="p-4 font-bold text-center w-32">Status</th>
+                                <th class="p-4 font-bold w-64">Catatan</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-[13px]">
+                            <% LOOP AT it_log INTO wa_log. %>
+                                <%
+                                    CLEAR: lv_vendor, lv_bankn, lv_banka, lv_koinh, lv_tot_item, lv_tot_calc, lv_selisih, lv_is_deleted, lv_is_invoice,
+                                           lv_str_rmwwr, lv_str_calc, lv_str_sel, lv_str_rseg, lv_str_rbco, lv_str_tax, lv_str_item, lv_str_beznk.
+
+                                    READ TABLE it_parked_inv INTO wa_inv WITH KEY belnr = wa_log-belnr gjahr = wa_log-gjahr.
+                                    IF sy-subrc = 0.
+                                        lv_is_deleted = abap_false.
+                                        IF wa_inv-xrech = 'X'. lv_is_invoice = abap_true. ELSE. lv_is_invoice = abap_false. ENDIF.
+
+                                        READ TABLE it_lfa1 INTO wa_lfa1 WITH KEY lifnr = wa_inv-lifnr.
+                                        IF sy-subrc = 0. lv_vendor = wa_lfa1-name1. ENDIF.
+
+                                        IF wa_inv-bvtyp IS NOT INITIAL.
+                                          READ TABLE it_lfbk INTO wa_lfbk WITH KEY lifnr = wa_inv-lifnr bvtyp = wa_inv-bvtyp.
+                                        ELSE.
+                                          READ TABLE it_lfbk INTO wa_lfbk WITH KEY lifnr = wa_inv-lifnr.
+                                        ENDIF.
+                                        IF sy-subrc = 0.
+                                          lv_bankn = wa_lfbk-bankn. lv_koinh = wa_lfbk-koinh.
+                                          IF lv_koinh IS INITIAL. lv_koinh = lv_vendor. ENDIF.
+                                          READ TABLE it_bnka INTO wa_bnka WITH KEY banks = wa_lfbk-banks bankl = wa_lfbk-bankl.
+                                          IF sy-subrc = 0. lv_banka = wa_bnka-banka. ELSE. lv_banka = wa_lfbk-bankl. ENDIF.
+                                        ELSE.
+                                          lv_bankn = '-'. lv_banka = 'Data bank kosong'. lv_koinh = '-'.
+                                        ENDIF.
+
+                                        lv_deadline = wa_inv-zfbdt.
+                                        IF wa_inv-zterm IS NOT INITIAL.
+                                          READ TABLE it_t052 INTO wa_t052 WITH KEY zterm = wa_inv-zterm.
+                                          IF sy-subrc = 0. lv_deadline = lv_deadline + wa_t052-ztag1. ENDIF.
+                                        ENDIF.
+
+                                        LOOP AT it_rseg INTO wa_rseg WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr.
+                                          IF lv_is_invoice = abap_true AND wa_rseg-shkzg = 'H'. CONTINUE. ENDIF.
+                                          IF lv_is_invoice = abap_false AND wa_rseg-shkzg = 'S'. CONTINUE. ENDIF.
+                                          lv_tot_item = lv_tot_item + wa_rseg-wrbtr.
+                                        ENDLOOP.
+
+                                        LOOP AT it_rbco INTO wa_rbco WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr.
+                                          READ TABLE it_rseg TRANSPORTING NO FIELDS WITH KEY belnr = wa_rbco-belnr gjahr = wa_rbco-gjahr buzei = wa_rbco-buzei.
+                                          IF sy-subrc <> 0.
+                                            IF lv_is_invoice = abap_true AND wa_rbco-shkzg = 'H'. CONTINUE. ENDIF.
+                                            IF lv_is_invoice = abap_false AND wa_rbco-shkzg = 'S'. CONTINUE. ENDIF.
+                                            lv_tot_item = lv_tot_item + wa_rbco-wrbtr.
+                                          ENDIF.
+                                        ENDLOOP.
+
+                                        lv_tot_calc = lv_tot_item + wa_inv-wmwst1 + wa_inv-beznk.
+                                        lv_selisih  = wa_inv-rmwwr - lv_tot_calc.
+
+                                        WRITE wa_inv-rmwwr  TO lv_str_rmwwr CURRENCY wa_inv-waers. CONDENSE lv_str_rmwwr.
+                                        WRITE lv_tot_calc   TO lv_str_calc  CURRENCY wa_inv-waers. CONDENSE lv_str_calc.
+                                        WRITE lv_selisih    TO lv_str_sel   CURRENCY wa_inv-waers. CONDENSE lv_str_sel.
+                                        WRITE lv_tot_item   TO lv_str_item  CURRENCY wa_inv-waers. CONDENSE lv_str_item.
+                                        WRITE wa_inv-wmwst1 TO lv_str_tax   CURRENCY wa_inv-waers. CONDENSE lv_str_tax.
+                                        WRITE wa_inv-beznk  TO lv_str_beznk CURRENCY wa_inv-waers. CONDENSE lv_str_beznk.
+                                    ELSE.
+                                        lv_is_deleted = abap_true.
+                                        lv_vendor = 'Data tidak tersedia'.
+                                        lv_bankn  = 'Tidak Tersedia'.
+                                        lv_koinh  = '-'.
+                                    ENDIF.
+                                %>
+
+                                <tr class="log-row border-b border-slate-200 hover:bg-blue-50 transition-colors bg-white group z-10 relative" data-search="<%= wa_log-belnr %> <%= wa_log-uname %> <%= wa_inv-lifnr %> <%= lv_vendor %>" data-belnr="<%=
+wa_log-belnr %>">
+                                    <td class="p-3 text-center align-middle whitespace-nowrap">
+                                        <button type="button" onclick="toggleDetail('<%= wa_log-belnr %>')" class="p-2 rounded-full hover:bg-blue-100 transition-colors bg-slate-100 text-slate-600 group-hover:text-blue-600 focus:outline-none">
+                                            <svg id="icon_<%= wa_log-belnr %>" class="w-4 h-4 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+d="M19 9l-7 7-7-7"></path></svg>
+                                        </button>
+                                    </td>
+                                    <td class="p-3 align-middle whitespace-nowrap">
+                                        <div class="font-bold text-slate-700 text-[13px]"><%= wa_log-datum+6(2) %>.<%= wa_log-datum+4(2) %>.<%= wa_log-datum(4) %></div>
+                                        <div class="text-[11px] font-medium text-slate-500 mt-0.5"><%= wa_log-uzeit(2) %>:<%= wa_log-uzeit+2(2) %>:<%= wa_log-uzeit+4(2) %> WIB</div>
+                                    </td>
+                                    <td class="p-3 align-middle whitespace-nowrap">
+                                        <span class="font-extrabold text-slate-800 text-[15px]">INV-<%= wa_log-belnr %></span>
+                                    </td>
+                                    <td class="p-3 align-middle">
+                                        <% IF lv_is_deleted = abap_true. %>
+                                            <div class="font-medium text-slate-400 italic text-xs">Dokumen dihapus/tidak tersedia</div>
+                                        <% ELSE. %>
+                                            <div class="font-bold text-slate-800 text-[13px]"><%= wa_inv-lifnr %></div>
+                                            <div class="text-[11px] text-slate-500 mt-0.5 flex items-center">
+                                                <% IF wa_inv-xblnr IS NOT INITIAL. %>
+                                                    <span class="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 font-medium mr-2" title="Reference">Ref: <%= wa_inv-xblnr %></span>
+                                                <% ENDIF. %>
+                                                <span class="truncate max-w-[200px]" title="<%= lv_vendor %>"><%= lv_vendor %></span>
+                                            </div>
+                                        <% ENDIF. %>
+                                    </td>
+                                    <td class="p-3 align-middle whitespace-nowrap">
+                                        <% IF lv_is_deleted = abap_true. %>
+                                            <span class="text-slate-300">-</span>
+                                        <% ELSE. %>
+                                            <div class="font-bold text-indigo-600 tracking-wide text-[13px]"><%= lv_bankn %></div>
+                                            <div class="text-[11px] text-slate-500 mt-0.5 uppercase truncate max-w-[150px]" title="<%= lv_koinh %>"><%= lv_koinh %></div>
+                                        <% ENDIF. %>
+                                    </td>
+                                    <td class="p-3 align-middle text-center whitespace-nowrap">
+                                        <span class="bg-slate-100 text-slate-600 px-2.5 py-1 rounded text-[11px] font-bold border border-slate-200"><%= wa_log-uname %></span>
+                                    </td>
+                                    <td class="p-3 text-center align-middle whitespace-nowrap">
+                                        <span class="inline-flex items-center px-2.5 py-1 rounded text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-sm uppercase tracking-wider">
+                                            <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg> Approved
+                                        </span>
+                                    </td>
+                                    <td class="p-3 align-middle">
+                                        <% IF wa_log-reason IS NOT INITIAL. %>
+                                            <div class="text-[11px] text-slate-600 font-medium bg-slate-50 px-3 py-1.5 rounded border border-slate-200 line-clamp-2" title="<%= wa_log-reason %>">"<%= wa_log-reason %>"</div>
+                                        <% ELSE. %>
+                                            <span class="text-slate-300 italic text-[11px]">Tidak ada catatan</span>
+                                        <% ENDIF. %>
+                                    </td>
+                                </tr>
+
+                                <tr id="detail_<%= wa_log-belnr %>" class="hidden bg-slate-100 border-b-2 border-slate-300 shadow-inner">
+                                    <td colspan="8" class="p-0">
+                                        <div class="p-6 m-4 bg-white rounded-lg shadow border border-slate-200 min-w-[800px]">
+                                            <% IF lv_is_deleted = abap_true. %>
+                                                <div class="text-center py-8">
+                                                    <div class="text-slate-300 mb-3"><svg class="w-14 h-14 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19
+7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></div>
+                                                    <h3 class="text-lg font-bold text-slate-500">Data Dokumen Tidak Tersedia</h3>
+                                                    <p class="text-sm text-slate-400 mt-1">Faktur ini mungkin telah dihapus dari sistem atau diarsipkan.</p>
+                                                </div>
+                                            <% ELSE. %>
+                                                <div class="mb-5 pb-3 border-b-2 border-slate-100 flex justify-between items-center">
+                                                    <h2 class="text-lg font-bold text-slate-800 flex items-center">
+                                                        <svg class="w-5 h-5 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0
+01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                                        Detail Faktur: <span class="text-blue-700 ml-1">INV-<%= wa_inv-belnr %></span>
+                                                        <span class="text-slate-400 font-normal ml-2 text-sm">/ Tahun: <%= wa_inv-gjahr %></span>
+                                                    </h2>
+                                                </div>
+
+                                                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+                                                    <div class="rounded p-4 bg-slate-50 border-l-4 border-slate-300">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Informasi Vendor</h3>
+                                                        <div class="font-extrabold text-sm text-slate-800"><%= wa_inv-lifnr %></div>
+                                                        <div class="font-semibold text-slate-600 text-[13px] mt-1"><%= lv_vendor %></div>
+                                                    </div>
+
+                                                    <div class="rounded p-4 bg-slate-50 border-l-4 border-slate-300">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Tujuan Pembayaran</h3>
+                                                        <div class="text-[13px] space-y-2">
+                                                            <div class="flex justify-between border-b border-slate-200 pb-1"><span>Bank:</span> <span class="font-bold text-slate-700"><%= lv_banka %></span></div>
+                                                            <div class="flex justify-between border-b border-slate-200 pb-1"><span>Rekening:</span> <span class="font-bold text-slate-800"><%= lv_bankn %></span></div>
+                                                            <div class="flex justify-between"><span>A.N:</span> <span class="font-semibold text-slate-600 truncate max-w-[120px]"><%= lv_koinh %></span></div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="rounded p-4 bg-slate-50 border-l-4 border-slate-300">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Tanggal &amp; Tenggat</h3>
+                                                        <div class="text-[13px] space-y-2">
+                                                            <div class="flex justify-between border-b border-slate-200 pb-1"><span>Tgl Faktur:</span> <span class="font-semibold text-slate-700"><%= wa_inv-bldat+6(2) %>.<%= wa_inv-bldat+4(2) %>.<%=
+wa_inv-bldat(4) %></span></div>
+                                                            <div class="flex justify-between border-b border-slate-200 pb-1"><span>Tgl Posting:</span> <span class="font-semibold text-slate-700"><%= wa_inv-budat+6(2) %>.<%= wa_inv-budat+4(2) %>.<%=
+wa_inv-budat(4) %></span></div>
+                                                            <div class="flex justify-between font-bold text-rose-600"><span>Jatuh Tempo:</span> <span><%= lv_deadline+6(2) %>.<%= lv_deadline+4(2) %>.<%= lv_deadline(4) %></span></div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="rounded p-4 bg-emerald-50 border-l-4 border-emerald-400 shadow-sm">
+                                                        <h3 class="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-2">Ringkasan Finansial</h3>
+                                                        <div class="text-[13px] space-y-1.5">
+                                                            <div class="flex justify-between text-slate-600"><span>Total Item:</span> <span><%= lv_str_item %> <%= wa_inv-waers %></span></div>
+                                                            <div class="flex justify-between text-slate-600"><span>Total Pajak:</span> <span>+ <%= lv_str_tax %> <%= wa_inv-waers %></span></div>
+                                                            <% IF wa_inv-beznk <> 0. %>
+                                                            <div class="flex justify-between text-slate-600"><span>Biaya Lain:</span> <span>+ <%= lv_str_beznk %> <%= wa_inv-waers %></span></div>
+                                                            <% ENDIF. %>
+                                                            <div class="flex justify-between font-bold text-slate-800 pt-1 border-t border-slate-300 mt-1"><span>Kalkulasi Sistem:</span> <span><%= lv_str_calc %> <%= wa_inv-waers %></span></div>
+                                                            <div class="flex justify-between font-extrabold text-blue-700"><span>Nilai Aktual (Nett):</span> <span><%= lv_str_rmwwr %> <%= wa_inv-waers %></span></div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                                                    <div>
+                                                        <h4 class="font-bold text-slate-800 mb-3 text-xs uppercase tracking-wider border-b-2 border-slate-200 pb-1 inline-block">Material Items (RSEG)</h4>
+                                                        <table class="w-full text-left text-[12px] border border-slate-300 rounded overflow-hidden">
+                                                            <thead>
+                                                                <tr class="bg-slate-200 text-slate-700 border-b border-slate-300">
+                                                                    <th class="p-2 font-bold">Item</th>
+                                                                    <th class="p-2 font-bold">No. PO</th>
+                                                                    <th class="p-2 font-bold">Material</th>
+                                                                    <th class="p-2 font-bold text-right">Nilai</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                <% LOOP AT it_rseg INTO wa_rseg WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr. %>
+                                                                    <% IF lv_is_invoice = abap_true  AND wa_rseg-shkzg = 'H'. CONTINUE. ENDIF. %>
+                                                                    <% IF lv_is_invoice = abap_false AND wa_rseg-shkzg = 'S'. CONTINUE. ENDIF. %>
+                                                                    <% CLEAR lv_str_rseg. WRITE wa_rseg-wrbtr TO lv_str_rseg CURRENCY wa_inv-waers. CONDENSE lv_str_rseg. %>
+                                                                    <tr class="border-b border-slate-200 last:border-0 hover:bg-slate-50">
+                                                                        <td class="p-2 text-slate-600"><%= wa_rseg-buzei %></td>
+                                                                        <td class="p-2 text-blue-600 font-bold"><%= wa_rseg-ebeln %></td>
+                                                                        <td class="p-2 text-slate-700 font-medium"><%= wa_rseg-matnr %></td>
+                                                                        <td class="p-2 text-right font-bold text-slate-800"><%= lv_str_rseg %></td>
+                                                                    </tr>
+                                                                <% ENDLOOP. %>
+                                                                <% IF sy-subrc <> 0. %>
+                                                                    <tr><td colspan="4" class="p-4 text-center text-slate-400 italic bg-slate-50">Tidak ada item material</td></tr>
+                                                                <% ENDIF. %>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+
+                                                    <div>
+                                                        <h4 class="font-bold text-slate-800 mb-3 text-xs uppercase tracking-wider border-b-2 border-slate-200 pb-1 inline-block">G/L &amp; Cost Center (RBCO)</h4>
+                                                        <table class="w-full text-left text-[12px] border border-slate-300 rounded overflow-hidden">
+                                                            <thead>
+                                                                <tr class="bg-slate-200 text-slate-700 border-b border-slate-300">
+                                                                    <th class="p-2 font-bold">Item</th>
+                                                                    <th class="p-2 font-bold">G/L Account</th>
+                                                                    <th class="p-2 font-bold">Cost Center</th>
+                                                                    <th class="p-2 font-bold text-right">Nilai</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                <% LOOP AT it_rbco INTO wa_rbco WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr. %>
+                                                                    <% IF lv_is_invoice = abap_true  AND wa_rbco-shkzg = 'H'. CONTINUE. ENDIF. %>
+                                                                    <% IF lv_is_invoice = abap_false AND wa_rbco-shkzg = 'S'. CONTINUE. ENDIF. %>
+                                                                    <% CLEAR lv_str_rbco. WRITE wa_rbco-wrbtr TO lv_str_rbco CURRENCY wa_inv-waers. CONDENSE lv_str_rbco. %>
+                                                                    <tr class="border-b border-slate-200 last:border-0 hover:bg-slate-50">
+                                                                        <td class="p-2 text-slate-600"><%= wa_rbco-buzei %></td>
+                                                                        <td class="p-2 text-slate-800 font-bold"><%= wa_rbco-saknr %></td>
+                                                                        <td class="p-2 text-slate-700 font-medium"><%= wa_rbco-kostl %></td>
+                                                                        <td class="p-2 text-right font-bold text-slate-800"><%= lv_str_rbco %></td>
+                                                                    </tr>
+                                                                <% ENDLOOP. %>
+                                                                <% IF sy-subrc <> 0. %>
+                                                                    <tr><td colspan="4" class="p-4 text-center text-slate-400 italic bg-slate-50">Tidak ada G/L item</td></tr>
+                                                                <% ENDIF. %>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            <% ENDIF. %>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <% ENDLOOP. %>
+
+                            <% IF it_log IS INITIAL. %>
+                            <tr>
+                                <td colspan="8" class="p-16 text-center bg-white">
+                                    <svg class="w-16 h-16 text-slate-200 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2
+4-4"></path>
+                                    </svg>
+                                    <div class="text-slate-600 font-bold text-lg">Riwayat Persetujuan Kosong</div>
+                                    <div class="text-slate-400 mt-1 text-sm">Dokumen yang telah disetujui akan muncul di halaman ini.</div>
+                                </td>
+                            </tr>
+                            <% ENDIF. %>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
