@@ -1,0 +1,3243 @@
+<%@page language="abap"%>
+<%
+  "========== TYPE DEFINITIONS ==========
+  TYPES: BEGIN OF ty_po_item,
+           po_item    TYPE ekpo-ebelp,
+           short_text TYPE ekpo-txz01,
+           quantity   TYPE ekpo-menge,
+           net_price  TYPE ekpo-netpr,
+           plant      TYPE ekpo-werks,
+         END OF ty_po_item.
+  TYPES tt_po_items TYPE STANDARD TABLE OF ty_po_item WITH EMPTY KEY.
+
+  TYPES: BEGIN OF ty_po_outstanding,
+           lifnr       TYPE ekko-lifnr,
+           name1       TYPE lfa1-name1,
+           ebeln       TYPE ekko-ebeln,
+           bedat       TYPE ekko-bedat,
+           bukrs       TYPE ekko-bukrs,
+           waers       TYPE ekko-waers,
+           zterm       TYPE ekko-zterm,
+           ebelp       TYPE ekpo-ebelp,
+           txz01       TYPE ekpo-txz01,
+           menge       TYPE ekpo-menge,
+           wrbtr       TYPE ekbe-wrbtr,
+           meins       TYPE ekpo-meins,
+           netpr       TYPE ekpo-netpr,
+           peinh       TYPE ekpo-peinh,
+           mwskz       TYPE ekpo-mwskz,
+           qty_gr      TYPE ekbe-menge,
+           qty_ir      TYPE ekbe-menge,
+           qty_open    TYPE ekbe-menge,
+           val_open    TYPE wrbtr,
+           mblnr       TYPE ekbe-belnr,
+           mjahr       TYPE ekbe-gjahr,
+           buzei       TYPE ekbe-buzei,
+           lfbnr       TYPE ekbe-belnr,
+           ses_xblnr   TYPE essr-xblnr,
+           is_ses      TYPE abap_bool,
+         END OF ty_po_outstanding.
+  TYPES tt_po_outstanding TYPE STANDARD TABLE OF ty_po_outstanding WITH EMPTY KEY.
+
+  TYPES: BEGIN OF ty_vendor_stats,
+           lifnr     TYPE ekko-lifnr,
+           po_cnt    TYPE i,
+           item_cnt  TYPE i,
+           val_sum   TYPE wrbtr,
+           idx       TYPE i,
+         END OF ty_vendor_stats.
+  TYPES tt_vendor_stats TYPE STANDARD TABLE OF ty_vendor_stats WITH EMPTY KEY.
+
+  TYPES: BEGIN OF ty_po_stats,
+           ebeln    TYPE ekko-ebeln,
+           val_sum  TYPE wrbtr,
+           idx      TYPE i,
+         END OF ty_po_stats.
+  TYPES tt_po_stats TYPE STANDARD TABLE OF ty_po_stats WITH EMPTY KEY.
+
+  "========== VARIABLES ==========
+  DATA: lv_po_number     TYPE ebeln,
+        lv_action        TYPE string,
+        gv_active_page   TYPE string,
+        lv_vendor        TYPE lifnr,
+        lv_gr_done       TYPE abap_bool,
+        lt_items         TYPE tt_po_items,
+        lv_success       TYPE abap_bool,
+        lv_errmsg        TYPE string,
+        lv_gr_text       TYPE string,
+        lt_outstanding   TYPE tt_po_outstanding,
+        lt_vnd_stats     TYPE tt_vendor_stats,
+        lt_po_stats      TYPE tt_po_stats,
+        lv_list_count    TYPE i,
+        lv_total_vendors TYPE i.
+
+  DATA: lv_date_from TYPE sy-datum.
+  lv_date_from = sy-datum - 5000.
+
+  "========== RETRIEVE INPUT ==========
+  lv_po_number = request->get_form_field( 'po_number' ).
+  lv_action    = request->get_form_field( 'action' ).
+
+  IF lv_action IS INITIAL.
+    lv_action = 'list_gr'.
+  ENDIF.
+
+  "========== FLOW LOGIC - UPLOAD DOCUMENTS (AJAX) ==========
+  IF lv_action = 'upload_docs'.
+    DATA: lv_ref_doc     TYPE ebeln,
+          lv_docs_json   TYPE string,
+          lv_xstring     TYPE xstring,
+          lv_uuid        TYPE sysuuid_c32,
+          ls_attach      TYPE zapp_attachment,
+          lt_attach      TYPE TABLE OF zapp_attachment.
+
+    " Struktur JSON parsing internal
+    TYPES: BEGIN OF ty_doc,
+             type    TYPE string,
+             name    TYPE string,
+             mime    TYPE string,
+             content TYPE string,
+           END OF ty_doc.
+    DATA: lt_docs TYPE TABLE OF ty_doc.
+
+    lv_ref_doc   = request->get_form_field( 'ref_doc' ).
+    lv_docs_json = request->get_form_field( 'docs_json' ).
+
+    " Konversi JSON ke internal table ABAP
+    /ui2/cl_json=>deserialize(
+      EXPORTING json = lv_docs_json
+      CHANGING  data = lt_docs
+    ).
+
+    LOOP AT lt_docs ASSIGNING FIELD-SYMBOL(<ls_doc>).
+      CLEAR ls_attach.
+
+      " Generate UUID (GUID)
+      TRY.
+          lv_uuid = cl_system_uuid=>create_uuid_c32_static( ).
+        CATCH cx_uuid_error.
+          " Skip or handle
+      ENDTRY.
+
+      " Konversi Base64 String ke XSTRING binary
+      CALL FUNCTION 'SSFC_BASE64_DECODE'
+        EXPORTING
+          b64data                   = <ls_doc>-content
+        IMPORTING
+          bindata                   = lv_xstring
+        EXCEPTIONS
+          ssf_krnl_nomemory         = 1
+          ssf_krnl_opinv            = 2
+          ssf_krnl_input_data_error = 3
+          OTHERS                    = 4.
+
+      " ⚠️ PERHATIAN PENTING UNTUK ERROR 135-142 ⚠️
+      " Jika setelah di-paste masih error di bagian ini, berarti nama kolom di SE11 Anda berbeda.
+      " Anda harus mengubah tulisan di sebelah KIRI tanda '=' sesuai nama field SE11.
+      " Contoh: Jika di SE11 namanya 'FILE_DATA' bukan 'FILE_CONTENT', ubah jadi ls_attach-file_data.
+      ls_attach-mandt        = sy-mandt.
+      ls_attach-attach_id    = lv_uuid.         " Ganti jika bukan attach_id
+      ls_attach-ref_doc      = lv_ref_doc.      " Ganti jika bukan ref_doc
+      ls_attach-doc_type     = <ls_doc>-type.   " Ganti jika bukan doc_type
+      ls_attach-file_name    = <ls_doc>-name.   " Ganti jika bukan file_name
+      ls_attach-file_type    = <ls_doc>-mime.   " Ini sudah disesuaikan dengan error Anda
+      ls_attach-file_content = lv_xstring.      " Ganti jika bukan file_content
+      ls_attach-upload_by    = sy-uname.        " Ganti jika bukan upload_by
+      ls_attach-upload_date  = sy-datum.        " Ganti jika bukan upload_date
+
+      APPEND ls_attach TO lt_attach.
+    ENDLOOP.
+
+    IF lt_attach IS NOT INITIAL.
+      INSERT zapp_attachment FROM TABLE lt_attach.
+      COMMIT WORK AND WAIT.
+
+      response->set_cdata( '{"status":"success", "message":"Dokumen berhasil disimpan."}' ).
+    ELSE.
+      response->set_cdata( '{"status":"error", "message":"Gagal memproses file."}' ).
+    ENDIF.
+
+    response->set_header_field( name = 'Content-Type' value = 'application/json' ).
+    RETURN. " Menghentikan eksekusi BSP agar tidak merender HTML
+  ENDIF.
+
+  "========== FLOW LOGIC - LIST PO OUTSTANDING GR ==========
+  IF lv_action = 'list_gr'.
+
+    DATA: BEGIN OF ls_ekbe_raw,
+            ebeln TYPE ekbe-ebeln,
+            ebelp TYPE ekbe-ebelp,
+            vgabe TYPE ekbe-vgabe,
+            menge TYPE ekbe-menge,
+            wrbtr TYPE ekbe-wrbtr,
+            shkzg TYPE ekbe-shkzg,
+            belnr TYPE ekbe-belnr,
+            gjahr TYPE ekbe-gjahr,
+            buzei TYPE ekbe-buzei,
+            lfbnr TYPE ekbe-lfbnr,
+          END OF ls_ekbe_raw,
+          lt_ekbe_raw LIKE TABLE OF ls_ekbe_raw.
+
+    DATA: BEGIN OF ls_join,
+            ebeln TYPE ekko-ebeln,
+            lifnr TYPE ekko-lifnr,
+            bedat TYPE ekko-bedat,
+            bukrs TYPE ekko-bukrs,
+            waers TYPE ekko-waers,
+            zterm TYPE ekko-zterm,
+            ebelp TYPE ekpo-ebelp,
+            txz01 TYPE ekpo-txz01,
+            menge TYPE ekpo-menge,
+            meins TYPE ekpo-meins,
+            netpr TYPE ekpo-netpr,
+            peinh TYPE ekpo-peinh,
+            mwskz TYPE ekpo-mwskz,
+          END OF ls_join,
+          lt_join LIKE TABLE OF ls_join.
+
+    " Langkah 1: Ambil PO item GR-Based IV aktif (filter 1 tahun)
+    SELECT k~ebeln, k~lifnr, k~bedat, k~bukrs, k~waers, k~zterm,
+           p~ebelp, p~txz01, p~menge, p~meins, p~netpr, p~peinh, p~mwskz
+      FROM ekko AS k
+      INNER JOIN ekpo AS p ON p~ebeln = k~ebeln
+      WHERE p~webre = 'X'
+        AND p~loekz = ''
+        AND k~loekz = ''
+        AND k~bedat >= @lv_date_from
+      INTO CORRESPONDING FIELDS OF TABLE @lt_join.
+
+    CHECK lt_join IS NOT INITIAL.
+
+    " Langkah 2: Ambil EKBE — vgabe 1=GR, 2=IR, 9=SES acceptance
+    SELECT ebeln, ebelp, vgabe, menge, wrbtr, shkzg, belnr, gjahr, buzei, lfbnr
+    FROM ekbe
+    FOR ALL ENTRIES IN @lt_join
+    WHERE ebeln = @lt_join-ebeln
+      AND ebelp = @lt_join-ebelp
+      AND vgabe IN ('1', '2', '9')
+    INTO CORRESPONDING FIELDS OF TABLE @lt_ekbe_raw.
+
+    SORT lt_join     BY ebeln ebelp.
+    SORT lt_ekbe_raw BY ebeln ebelp vgabe lfbnr belnr.
+
+    DATA: lv_qty_gr   TYPE ekbe-menge,
+          lv_qty_ir   TYPE ekbe-menge,
+          lv_qty_open TYPE ekbe-menge,
+          lv_val_gr   TYPE wrbtr,
+          lv_val_ir   TYPE wrbtr,
+          lv_val_open TYPE wrbtr,
+          lv_mblnr    TYPE ekbe-belnr,
+          lv_mjahr    TYPE ekbe-gjahr,
+          lv_buzei    TYPE ekbe-buzei,
+          lv_lfbnr    TYPE ekbe-lfbnr,
+          lv_tabix    TYPE sytabix.
+
+    LOOP AT lt_join ASSIGNING FIELD-SYMBOL(<ls_j>).
+
+      CLEAR: lv_qty_gr, lv_qty_ir, lv_val_gr, lv_val_ir,
+             lv_mblnr, lv_mjahr, lv_buzei, lv_lfbnr.
+
+      " ---- Cek apakah item ini SES-based (ada vgabe=9) ----
+      DATA lv_has_ses TYPE abap_bool.
+      CLEAR lv_has_ses.
+      READ TABLE lt_ekbe_raw
+        WITH KEY ebeln = <ls_j>-ebeln
+                 ebelp = <ls_j>-ebelp
+                 vgabe = '9'
+        TRANSPORTING NO FIELDS
+        BINARY SEARCH.
+      IF sy-subrc = 0.
+        lv_has_ses = abap_true.
+      ENDIF.
+
+      IF lv_has_ses = abap_true.
+        " ============================================================
+        " SES-based: per SES matching (1 baris per nomor SES / lfbnr).
+        " ============================================================
+        DATA: BEGIN OF ls_ses_ir_ref,
+                lfbnr TYPE ekbe-lfbnr,
+              END OF ls_ses_ir_ref,
+              lt_ses_ir_ref LIKE TABLE OF ls_ses_ir_ref.
+        CLEAR lt_ses_ir_ref.
+
+        READ TABLE lt_ekbe_raw
+          WITH KEY ebeln = <ls_j>-ebeln
+                   ebelp = <ls_j>-ebelp
+                   vgabe = '2'
+          TRANSPORTING NO FIELDS
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_tabix = sy-tabix.
+          LOOP AT lt_ekbe_raw ASSIGNING FIELD-SYMBOL(<ls_ir2>) FROM lv_tabix.
+            IF <ls_ir2>-ebeln <> <ls_j>-ebeln
+            OR <ls_ir2>-ebelp <> <ls_j>-ebelp
+            OR <ls_ir2>-vgabe <> '2'.
+              EXIT.
+            ENDIF.
+            IF <ls_ir2>-lfbnr IS NOT INITIAL AND <ls_ir2>-shkzg = 'S'.
+              ls_ses_ir_ref-lfbnr = <ls_ir2>-lfbnr.
+              COLLECT ls_ses_ir_ref INTO lt_ses_ir_ref.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        DATA lv_prev_lfbnr TYPE ekbe-lfbnr.
+        DATA lv_ses_qty    TYPE ekbe-menge.
+        DATA lv_ses_val    TYPE wrbtr.
+        DATA lv_ses_belnr  TYPE ekbe-belnr.
+        DATA lv_ses_gjahr  TYPE ekbe-gjahr.
+        DATA lv_ses_buzei  TYPE ekbe-buzei.
+        DATA ls_ses_emit   TYPE ty_po_outstanding.
+
+        CLEAR: lv_prev_lfbnr, lv_ses_qty, lv_ses_val,
+               lv_ses_belnr, lv_ses_gjahr, lv_ses_buzei, ls_ses_emit.
+
+        READ TABLE lt_ekbe_raw
+          WITH KEY ebeln = <ls_j>-ebeln
+                   ebelp = <ls_j>-ebelp
+                   vgabe = '9'
+          TRANSPORTING NO FIELDS
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_tabix = sy-tabix.
+          LOOP AT lt_ekbe_raw ASSIGNING FIELD-SYMBOL(<ls_s>) FROM lv_tabix.
+            IF <ls_s>-ebeln <> <ls_j>-ebeln
+            OR <ls_s>-ebelp <> <ls_j>-ebelp
+            OR <ls_s>-vgabe <> '9'.
+              EXIT.
+            ENDIF.
+
+            IF lv_prev_lfbnr IS NOT INITIAL
+            AND <ls_s>-lfbnr <> lv_prev_lfbnr.
+              READ TABLE lt_ses_ir_ref WITH KEY lfbnr = lv_prev_lfbnr
+                TRANSPORTING NO FIELDS.
+              IF sy-subrc <> 0 AND lv_ses_qty > 0 AND lv_ses_val > 0.
+                CLEAR ls_ses_emit.
+                ls_ses_emit-lifnr    = <ls_j>-lifnr.
+                ls_ses_emit-ebeln    = <ls_j>-ebeln.
+                ls_ses_emit-bedat    = <ls_j>-bedat.
+                ls_ses_emit-bukrs    = <ls_j>-bukrs.
+                ls_ses_emit-waers    = <ls_j>-waers.
+                ls_ses_emit-zterm    = <ls_j>-zterm.
+                ls_ses_emit-ebelp    = <ls_j>-ebelp.
+                ls_ses_emit-txz01    = <ls_j>-txz01.
+                ls_ses_emit-menge    = <ls_j>-menge.
+                ls_ses_emit-meins    = <ls_j>-meins.
+                ls_ses_emit-netpr    = <ls_j>-netpr.
+                ls_ses_emit-peinh    = <ls_j>-peinh.
+                ls_ses_emit-mwskz    = <ls_j>-mwskz.
+                ls_ses_emit-qty_gr   = lv_ses_qty.
+                ls_ses_emit-qty_ir   = 0.
+                ls_ses_emit-qty_open = lv_ses_qty.
+                ls_ses_emit-val_open = lv_ses_val.
+                ls_ses_emit-mblnr    = lv_ses_belnr.
+                ls_ses_emit-mjahr    = lv_ses_gjahr.
+                ls_ses_emit-buzei    = lv_ses_buzei.
+                ls_ses_emit-lfbnr    = lv_prev_lfbnr.
+                ls_ses_emit-is_ses   = abap_true.
+                APPEND ls_ses_emit TO lt_outstanding.
+              ENDIF.
+              CLEAR: lv_ses_qty, lv_ses_val,
+                     lv_ses_belnr, lv_ses_gjahr, lv_ses_buzei.
+            ENDIF.
+
+            IF <ls_s>-shkzg = 'S'.
+              lv_ses_qty   = lv_ses_qty   + <ls_s>-menge.
+              lv_ses_val   = lv_ses_val   + <ls_s>-wrbtr.
+              lv_ses_belnr = <ls_s>-belnr.
+              lv_ses_gjahr = <ls_s>-gjahr.
+              lv_ses_buzei = <ls_s>-buzei.
+            ELSEIF <ls_s>-shkzg = 'H'.
+              lv_ses_qty = lv_ses_qty - <ls_s>-menge.
+              lv_ses_val = lv_ses_val - <ls_s>-wrbtr.
+            ENDIF.
+            lv_prev_lfbnr = <ls_s>-lfbnr.
+          ENDLOOP.
+
+          IF lv_prev_lfbnr IS NOT INITIAL.
+            READ TABLE lt_ses_ir_ref WITH KEY lfbnr = lv_prev_lfbnr
+              TRANSPORTING NO FIELDS.
+            IF sy-subrc <> 0 AND lv_ses_qty > 0 AND lv_ses_val > 0.
+              CLEAR ls_ses_emit.
+              ls_ses_emit-lifnr    = <ls_j>-lifnr.
+              ls_ses_emit-ebeln    = <ls_j>-ebeln.
+              ls_ses_emit-bedat    = <ls_j>-bedat.
+              ls_ses_emit-bukrs    = <ls_j>-bukrs.
+              ls_ses_emit-waers    = <ls_j>-waers.
+              ls_ses_emit-zterm    = <ls_j>-zterm.
+              ls_ses_emit-ebelp    = <ls_j>-ebelp.
+              ls_ses_emit-txz01    = <ls_j>-txz01.
+              ls_ses_emit-menge    = <ls_j>-menge.
+              ls_ses_emit-meins    = <ls_j>-meins.
+              ls_ses_emit-netpr    = <ls_j>-netpr.
+              ls_ses_emit-peinh    = <ls_j>-peinh.
+              ls_ses_emit-mwskz    = <ls_j>-mwskz.
+              ls_ses_emit-qty_gr   = lv_ses_qty.
+              ls_ses_emit-qty_ir   = 0.
+              ls_ses_emit-qty_open = lv_ses_qty.
+              ls_ses_emit-val_open = lv_ses_val.
+              ls_ses_emit-mblnr    = lv_ses_belnr.
+              ls_ses_emit-mjahr    = lv_ses_gjahr.
+              ls_ses_emit-buzei    = lv_ses_buzei.
+              ls_ses_emit-lfbnr    = lv_prev_lfbnr.
+              ls_ses_emit-is_ses   = abap_true.
+              APPEND ls_ses_emit TO lt_outstanding.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+
+      ELSE.
+        " ============================================================
+        " Material GR-based: per GR document matching
+        " ============================================================
+        DATA: BEGIN OF ls_ir_ref,
+                lfbnr TYPE ekbe-lfbnr,
+              END OF ls_ir_ref,
+              lt_ir_ref LIKE TABLE OF ls_ir_ref.
+        CLEAR lt_ir_ref.
+
+        READ TABLE lt_ekbe_raw
+          WITH KEY ebeln = <ls_j>-ebeln
+                   ebelp = <ls_j>-ebelp
+                   vgabe = '2'
+          TRANSPORTING NO FIELDS
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_tabix = sy-tabix.
+          LOOP AT lt_ekbe_raw ASSIGNING FIELD-SYMBOL(<ls_ir>) FROM lv_tabix.
+            IF <ls_ir>-ebeln <> <ls_j>-ebeln
+            OR <ls_ir>-ebelp <> <ls_j>-ebelp
+            OR <ls_ir>-vgabe <> '2'.
+              EXIT.
+            ENDIF.
+            IF <ls_ir>-lfbnr IS NOT INITIAL AND <ls_ir>-shkzg = 'S'.
+              ls_ir_ref-lfbnr = <ls_ir>-lfbnr.
+              COLLECT ls_ir_ref INTO lt_ir_ref.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        DATA: lv_gr_mblnr  TYPE ekbe-belnr,
+              lv_gr_gjahr  TYPE ekbe-gjahr,
+              lv_gr_buzei  TYPE ekbe-buzei,
+              lv_gr_qty    TYPE ekbe-menge,
+              lv_gr_val    TYPE wrbtr,
+              lv_prev_lfbnr_gr TYPE ekbe-lfbnr.
+        CLEAR: lv_prev_lfbnr_gr, lv_gr_qty, lv_gr_val,
+               lv_gr_mblnr, lv_gr_gjahr, lv_gr_buzei.
+
+        READ TABLE lt_ekbe_raw
+          WITH KEY ebeln = <ls_j>-ebeln
+                   ebelp = <ls_j>-ebelp
+                   vgabe = '1'
+          TRANSPORTING NO FIELDS
+          BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_tabix = sy-tabix.
+          LOOP AT lt_ekbe_raw ASSIGNING FIELD-SYMBOL(<ls_g>) FROM lv_tabix.
+            IF <ls_g>-ebeln <> <ls_j>-ebeln
+            OR <ls_g>-ebelp <> <ls_j>-ebelp
+            OR <ls_g>-vgabe <> '1'.
+              EXIT.
+            ENDIF.
+
+            IF lv_prev_lfbnr_gr IS NOT INITIAL
+            AND <ls_g>-lfbnr <> lv_prev_lfbnr_gr.
+              READ TABLE lt_ir_ref WITH KEY lfbnr = lv_prev_lfbnr_gr
+                TRANSPORTING NO FIELDS.
+              IF sy-subrc <> 0 AND lv_gr_qty > 0 AND lv_gr_val > 0.
+                DATA(ls_out_row) = VALUE ty_po_outstanding(
+                  lifnr    = <ls_j>-lifnr
+                  ebeln    = <ls_j>-ebeln
+                  bedat    = <ls_j>-bedat
+                  bukrs    = <ls_j>-bukrs
+                  waers    = <ls_j>-waers
+                  zterm    = <ls_j>-zterm
+                  ebelp    = <ls_j>-ebelp
+                  txz01    = <ls_j>-txz01
+                  menge    = <ls_j>-menge
+                  meins    = <ls_j>-meins
+                  netpr    = <ls_j>-netpr
+                  peinh    = <ls_j>-peinh
+                  mwskz    = <ls_j>-mwskz
+                  qty_gr   = lv_gr_qty
+                  qty_ir   = 0
+                  qty_open = lv_gr_qty
+                  val_open = lv_gr_val
+                  mblnr    = lv_gr_mblnr
+                  mjahr    = lv_gr_gjahr
+                  buzei    = lv_gr_buzei
+                  is_ses   = abap_false
+                ).
+                APPEND ls_out_row TO lt_outstanding.
+              ENDIF.
+              CLEAR: lv_gr_qty, lv_gr_val,
+                     lv_gr_mblnr, lv_gr_gjahr, lv_gr_buzei.
+            ENDIF.
+
+            IF <ls_g>-shkzg = 'S'.
+              lv_gr_qty   = lv_gr_qty + <ls_g>-menge.
+              lv_gr_val   = lv_gr_val + <ls_g>-wrbtr.
+              lv_gr_mblnr = <ls_g>-belnr.
+              lv_gr_gjahr = <ls_g>-gjahr.
+              lv_gr_buzei = <ls_g>-buzei.
+            ELSE.
+              lv_gr_qty = lv_gr_qty - <ls_g>-menge.
+              lv_gr_val = lv_gr_val - <ls_g>-wrbtr.
+            ENDIF.
+            lv_prev_lfbnr_gr = <ls_g>-lfbnr.
+          ENDLOOP.
+
+          IF lv_prev_lfbnr_gr IS NOT INITIAL.
+            READ TABLE lt_ir_ref WITH KEY lfbnr = lv_prev_lfbnr_gr
+              TRANSPORTING NO FIELDS.
+            IF sy-subrc <> 0 AND lv_gr_qty > 0 AND lv_gr_val > 0.
+              DATA(ls_out_last) = VALUE ty_po_outstanding(
+                lifnr    = <ls_j>-lifnr
+                ebeln    = <ls_j>-ebeln
+                bedat    = <ls_j>-bedat
+                bukrs    = <ls_j>-bukrs
+                waers    = <ls_j>-waers
+                zterm    = <ls_j>-zterm
+                ebelp    = <ls_j>-ebelp
+                txz01    = <ls_j>-txz01
+                menge    = <ls_j>-menge
+                meins    = <ls_j>-meins
+                netpr    = <ls_j>-netpr
+                peinh    = <ls_j>-peinh
+                mwskz    = <ls_j>-mwskz
+                qty_gr   = lv_gr_qty
+                qty_ir   = 0
+                qty_open = lv_gr_qty
+                val_open = lv_gr_val
+                mblnr    = lv_gr_mblnr
+                mjahr    = lv_gr_gjahr
+                buzei    = lv_gr_buzei
+                is_ses   = abap_false
+              ).
+              APPEND ls_out_last TO lt_outstanding.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+
+      ENDIF. " lv_has_ses
+
+    ENDLOOP.
+
+    " Langkah 4: Ambil nama vendor
+    IF lt_outstanding IS NOT INITIAL.
+      DATA: BEGIN OF ls_vendor,
+              lifnr TYPE lfa1-lifnr,
+              name1 TYPE lfa1-name1,
+            END OF ls_vendor,
+            lt_vendor LIKE TABLE OF ls_vendor.
+
+      SELECT lifnr, name1
+        FROM lfa1
+        FOR ALL ENTRIES IN @lt_outstanding
+        WHERE lifnr = @lt_outstanding-lifnr
+        INTO CORRESPONDING FIELDS OF TABLE @lt_vendor.
+
+      LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_fill>).
+        READ TABLE lt_vendor ASSIGNING FIELD-SYMBOL(<ls_v>)
+          WITH KEY lifnr = <ls_fill>-lifnr.
+        IF sy-subrc = 0.
+          <ls_fill>-name1 = <ls_v>-name1.
+        ENDIF.
+      ENDLOOP.
+
+      " Langkah 5: Ambil SES xblnr
+      DATA: BEGIN OF ls_essr,
+              lfbnr TYPE ekbe-lfbnr,
+              xblnr TYPE essr-xblnr,
+            END OF ls_essr,
+            lt_essr LIKE TABLE OF ls_essr.
+
+      " ⚠️ PERBAIKAN UNTUK ERROR 560-561 ⚠️
+      " Diganti menjadi WITH DEFAULT KEY agar bisa di-SORT dengan benar
+      DATA lt_lfbnr_keys TYPE STANDARD TABLE OF ekbe-lfbnr WITH DEFAULT KEY.
+      LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_lfbnr_row>).
+        IF <ls_lfbnr_row>-lfbnr IS NOT INITIAL.
+          APPEND <ls_lfbnr_row>-lfbnr TO lt_lfbnr_keys.
+        ENDIF.
+      ENDLOOP.
+
+      IF lt_lfbnr_keys IS NOT INITIAL.
+        SORT lt_lfbnr_keys.
+        DELETE ADJACENT DUPLICATES FROM lt_lfbnr_keys.
+        SELECT lblni AS lfbnr, xblnr
+          FROM essr
+          FOR ALL ENTRIES IN @lt_lfbnr_keys
+          WHERE lblni = @lt_lfbnr_keys-table_line
+          INTO CORRESPONDING FIELDS OF TABLE @lt_essr.
+        SORT lt_essr BY lfbnr.
+
+        LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_ses_fill>).
+          IF <ls_ses_fill>-lfbnr IS NOT INITIAL.
+            READ TABLE lt_essr ASSIGNING FIELD-SYMBOL(<ls_essr_row>)
+              WITH KEY lfbnr = <ls_ses_fill>-lfbnr BINARY SEARCH.
+            IF sy-subrc = 0.
+              <ls_ses_fill>-ses_xblnr = <ls_essr_row>-xblnr.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    SORT lt_outstanding BY lifnr name1 bedat ASCENDING ebeln ebelp lfbnr.
+    lv_list_count = lines( lt_outstanding ).
+
+    " ---- Build vendor stats ----
+    DATA: lv_vs_lifnr_prev TYPE ekko-lifnr,
+          lv_vs_idx        TYPE i,
+          ls_vstat         TYPE ty_vendor_stats.
+    CLEAR: lv_vs_lifnr_prev, lv_vs_idx.
+
+    LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_vs>).
+      IF <ls_vs>-lifnr <> lv_vs_lifnr_prev.
+        IF lv_vs_lifnr_prev IS NOT INITIAL.
+          APPEND ls_vstat TO lt_vnd_stats.
+        ENDIF.
+        lv_vs_idx = lv_vs_idx + 1.
+        CLEAR ls_vstat.
+        ls_vstat-lifnr    = <ls_vs>-lifnr.
+        ls_vstat-idx      = lv_vs_idx.
+        ls_vstat-item_cnt = 0.
+        ls_vstat-po_cnt   = 0.
+        ls_vstat-val_sum  = 0.
+        lv_vs_lifnr_prev  = <ls_vs>-lifnr.
+      ENDIF.
+      ls_vstat-item_cnt = ls_vstat-item_cnt + 1.
+      ls_vstat-val_sum  = ls_vstat-val_sum + <ls_vs>-val_open.
+    ENDLOOP.
+    IF lv_vs_lifnr_prev IS NOT INITIAL.
+      APPEND ls_vstat TO lt_vnd_stats.
+    ENDIF.
+
+    SORT lt_outstanding BY lifnr ebeln.
+    DATA: lv_cnt_lifnr_prev TYPE ekko-lifnr,
+          lv_cnt_ebeln_prev TYPE ekko-ebeln.
+    CLEAR: lv_cnt_lifnr_prev, lv_cnt_ebeln_prev.
+
+    LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_vpo>).
+      IF <ls_vpo>-lifnr <> lv_cnt_lifnr_prev OR <ls_vpo>-ebeln <> lv_cnt_ebeln_prev.
+        IF <ls_vpo>-ebeln <> lv_cnt_ebeln_prev.
+          READ TABLE lt_vnd_stats ASSIGNING FIELD-SYMBOL(<ls_vsc2>)
+            WITH KEY lifnr = <ls_vpo>-lifnr.
+          IF sy-subrc = 0.
+            <ls_vsc2>-po_cnt = <ls_vsc2>-po_cnt + 1.
+          ENDIF.
+          lv_cnt_ebeln_prev = <ls_vpo>-ebeln.
+        ENDIF.
+        lv_cnt_lifnr_prev = <ls_vpo>-lifnr.
+      ENDIF.
+    ENDLOOP.
+
+    SORT lt_outstanding BY lifnr name1 bedat ASCENDING ebeln ebelp lfbnr.
+
+    " ---- Build PO stats ----
+    DATA: lv_ps_ebeln_prev TYPE ekko-ebeln,
+          lv_ps_lifnr_prev TYPE ekko-lifnr,
+          lv_ps_po_idx     TYPE i,
+          ls_pstat         TYPE ty_po_stats.
+    CLEAR: lv_ps_ebeln_prev, lv_ps_lifnr_prev, lv_ps_po_idx.
+
+    LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_ps>).
+      IF <ls_ps>-lifnr <> lv_ps_lifnr_prev.
+        lv_ps_po_idx     = 0.
+        lv_ps_lifnr_prev = <ls_ps>-lifnr.
+      ENDIF.
+      IF <ls_ps>-ebeln <> lv_ps_ebeln_prev.
+        IF lv_ps_ebeln_prev IS NOT INITIAL.
+          APPEND ls_pstat TO lt_po_stats.
+        ENDIF.
+        lv_ps_po_idx = lv_ps_po_idx + 1.
+        CLEAR ls_pstat.
+        ls_pstat-ebeln   = <ls_ps>-ebeln.
+        ls_pstat-val_sum = 0.
+        ls_pstat-idx     = lv_ps_po_idx.
+        lv_ps_ebeln_prev = <ls_ps>-ebeln.
+      ENDIF.
+      ls_pstat-val_sum = ls_pstat-val_sum + <ls_ps>-val_open.
+    ENDLOOP.
+    IF lv_ps_ebeln_prev IS NOT INITIAL.
+      APPEND ls_pstat TO lt_po_stats.
+    ENDIF.
+
+    lv_total_vendors = lines( lt_vnd_stats ).
+
+  ENDIF.
+
+  "========== FLOW LOGIC - SEARCH PO MANUAL ==========
+  IF lv_action = 'search' AND lv_po_number IS NOT INITIAL.
+
+    DATA: ls_out       TYPE ty_po_item,
+          lv_gr_count  TYPE i,
+          lv_po_exists TYPE abap_bool.
+
+    SELECT SINGLE lifnr INTO @lv_vendor
+      FROM ekko WHERE ebeln = @lv_po_number.
+
+    IF sy-subrc = 0.
+      lv_po_exists = abap_true.
+
+      SELECT ebelp AS po_item, txz01 AS short_text, menge AS quantity,
+             netpr AS net_price, werks AS plant
+        FROM ekpo
+        WHERE ebeln = @lv_po_number
+        INTO CORRESPONDING FIELDS OF TABLE @lt_items.
+
+      SELECT COUNT(*) INTO @lv_gr_count
+        FROM ekbe
+        WHERE ebeln = @lv_po_number
+          AND bewtp = 'E'
+          AND bwart = '101'.
+
+      lv_gr_done = COND #( WHEN lv_gr_count > 0
+                            THEN abap_true
+                            ELSE abap_false ).
+
+      IF lv_gr_done = abap_true.
+        lv_gr_text = 'Sudah Diterima (GR OK)'.
+      ELSE.
+        lv_gr_text = 'Belum Ada GR'.
+      ENDIF.
+
+      lv_success = abap_true.
+    ELSE.
+      lv_errmsg = |Nomor PO { lv_po_number } tidak ditemukan di sistem.|.
+      lv_success = abap_false.
+    ENDIF.
+
+  ENDIF.
+
+  "========== SIDEBAR VARIABLES (Layout Only) ==========
+  DATA: lv_role TYPE string.
+        lv_role = request->get_form_field( 'role' ).
+        gv_active_page = 'MAIN'.
+
+
+        "========== RETRIEVE G/L ACCOUNT MASTER ==========
+  TYPES: BEGIN OF ty_skat,
+           saknr TYPE skat-saknr,
+           txt50 TYPE skat-txt50,
+         END OF ty_skat.
+  DATA: lt_skat TYPE TABLE OF ty_skat.
+
+  " Ambil deskripsi G/L Account (txt50) dari tabel SKAT
+  " CATATAN: Ganti '1000' dengan kode Chart of Accounts (KTOPL) yang digunakan di sistemmu
+  SELECT saknr txt50
+    INTO TABLE lt_skat
+    FROM skat
+    WHERE spras = sy-langu
+      AND ktopl = '1000'.
+%>
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AP Invoice - Pencarian PO</title>
+    <link rel="icon" type="image/png" href="logokmi.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f1f5f9 !important;
+    color: #1e293b !important;
+    height: 100vh;
+    overflow: hidden;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .app-layout { display: flex; height: 100vh; overflow: hidden; }
+  .app-main { flex: 1; overflow-y: auto; height: 100vh; padding: 0; background: #f1f5f9; }
+  .app-content { padding: 24px 32px; }
+
+  .page-header { text-align: left; padding: 28px 32px 24px; margin-bottom: 0; background: #ffffff; border-bottom: 1px solid #e2e8f0; }
+  .page-header h1 { font-size: 28px; font-weight: 700; color: #0f172a; letter-spacing: -0.03em; margin-bottom: 4px; line-height: 1.2; }
+  .page-header p { font-size: 14px; color: #64748b; }
+
+  .card { background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 20px; overflow: hidden; }
+  .card-header { padding: 14px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 10px; }
+  .card-header h2 { font-size: 15px; font-weight: 600; color: #1e293b; }
+  .card-body { padding: 20px 24px; }
+
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; font-family: inherit; border: none; border-radius: 8px; cursor: pointer; transition: all 0.15s ease; text-decoration: none; white-space:
+nowrap; }
+  .btn-primary { background: #059669; color: #ffffff; box-shadow: 0 1px 3px rgba(5,150,105,0.35); }
+  .btn-primary:hover { background: #047857; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(5,150,105,0.3); }
+  .btn-secondary { background: #ffffff; color: #475569; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+  .btn-secondary:hover { background: #f8fafc; border-color: #cbd5e1; transform: translateY(-1px); }
+  .btn-sm { padding: 5px 12px; font-size: 12px; border-radius: 6px; }
+
+  .filter-bar-unified { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .filter-unified-search { flex: 1; min-width: 220px; display: flex; align-items: center; background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 0 12px; gap: 8px; transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+  .filter-unified-search:focus-within { border-color: #059669; box-shadow: 0 0 0 3px rgba(5,150,105,0.12); }
+  .filter-search-icon { font-size: 16px; color: #94a3b8; flex-shrink: 0; }
+  .filter-unified-search input[type="text"] { flex: 1; border: none; outline: none; padding: 10px 0; font-size: 14px; color: #1e293b; background: transparent; font-family: inherit; }
+  .filter-unified-search input[type="text"]::placeholder { color: #94a3b8; }
+  .filter-clear-btn { background: none; border: none; cursor: pointer; color: #94a3b8; font-size: 14px; padding: 4px 2px; line-height: 1; display: none; transition: color 0.15s ease; }
+  .filter-clear-btn:hover { color: #dc2626; }
+  .filter-clear-btn.visible { display: block; }
+  .filter-actions-row { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+  .summary-bar { display: flex; align-items: center; gap: 20px; padding: 14px 18px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .summary-item { display: flex; flex-direction: column; gap: 2px; }
+  .summary-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; }
+  .summary-value { font-size: 20px; font-weight: 700; color: #059669; font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace; }
+  .summary-divider { width: 1px; height: 36px; background: #e2e8f0; }
+
+  .pagination { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 16px 0 4px; flex-wrap: wrap; }
+  .page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 36px; padding: 0 10px; font-size: 14px; font-weight: 600; border-radius: 8px; border: 1px solid #e2e8f0; background: #ffffff; color: #475569;
+cursor: pointer; transition: all 0.2s ease; text-decoration: none; font-family: inherit; }
+  .page-btn:hover { border-color: #a7f3d0; color: #059669; }
+  .page-btn.active { background: #059669; color: #ffffff; font-weight: 700; }
+  .page-btn.disabled { opacity: 0.3; cursor: not-allowed; pointer-events: none; }
+
+  .po-item-row.ses-row { background: #fdfaff; border-left: 2px solid #c4b5fd; }
+  .po-item-row.ses-row:hover { background: #f5f3ff; }
+
+  .val-highlight { color: #059669; font-family: 'SF Mono', 'Consolas', monospace; font-weight: 600; }
+
+  .empty-state { text-align: center; padding: 50px 20px; color: #94a3b8; }
+  .empty-state-icon { font-size: 48px; display: block; margin-bottom: 14px; }
+  .empty-state-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; color: #475569; }
+  .empty-state-sub { font-size: 14px; }
+
+  .accordion-vendor { margin-bottom: 10px; border-radius: 10px; border: 1px solid #e2e8f0; overflow: hidden; background: #ffffff; transition: box-shadow 0.15s ease; }
+  .accordion-vendor.open { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .accordion-vendor-header { display: flex; align-items: center; gap: 12px; padding: 13px 16px; background: #f8fafc; cursor: pointer; user-select: none; border-bottom: 1px solid transparent; transition: background 0.15s ease; }
+  .accordion-vendor.open .accordion-vendor-header { border-bottom-color: #e2e8f0; background: #f0fdf4; }
+  .accordion-vendor-header:hover { background: #f0fdf4; }
+  .acc-chevron { font-size: 11px; color: #059669; transition: transform 0.25s ease; flex-shrink: 0; }
+  .accordion-vendor.open .acc-chevron { transform: rotate(90deg); }
+  .accordion-vendor-body { display: none; padding: 0 0 8px; }
+  .accordion-vendor.open .accordion-vendor-body { display: block; }
+  .acc-vendor-name { font-size: 15px; font-weight: 600; color: #0f172a; flex: 1; }
+  .acc-vendor-id { font-size: 12px; color: #94a3b8; font-weight: 400; font-family: 'SF Mono', 'Consolas', monospace; }
+  .acc-vendor-stats { display: flex; gap: 10px; flex-shrink: 0; }
+  .acc-stat { font-size: 12px; color: #64748b; background: #f1f5f9; border: 1px solid #e2e8f0; padding: 2px 8px; border-radius: 20px; }
+  .acc-vendor-cb { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; accent-color: #059669; }
+
+  .po-group { margin: 8px 10px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; overflow: hidden; }
+  .po-group-header { display: flex; align-items: center; gap: 10px; padding: 9px 13px; background: #ffffff; border-bottom: 1px solid #f1f5f9; }
+  .po-group-cb { width: 15px; height: 15px; cursor: pointer; accent-color: #059669; }
+  .po-group-num { font-size: 13px; font-weight: 700; color: #059669; font-family: 'SF Mono', 'Consolas', monospace; flex: 1; }
+  .po-group-date { font-size: 12px; color: #94a3b8; }
+  .po-group-val { font-size: 12px; color: #c2410c; font-family: 'SF Mono', 'Consolas', monospace; margin-left: auto; }
+  .po-group-zterm { display: inline-flex; align-items: center; gap: 4px; background: #faf5ff; border: 1px solid #e9d5ff; color: #7c3aed; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 20px; font-family: 'SF Mono', 'Consolas',
+monospace; white-space: nowrap; }
+  .po-group-zterm.empty { background: #f8fafc; border-color: #e2e8f0; color: #94a3b8; font-weight: 400; font-family: inherit; }
+
+  .po-items-thead,
+  .po-item-row {
+    display: grid;
+    grid-template-columns: 28px 55px 1fr 70px 70px 50px 90px 90px 55px 55px 110px;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 13px;
+    font-size: 12px;
+  }
+  .po-items-thead { background: #f1f5f9; color: #64748b; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; border-bottom: 1px solid #e2e8f0; }
+  .po-item-row { border-bottom: 1px solid #f1f5f9; transition: background 0.1s ease; }
+  .po-item-row:hover { background: #f0fdf4; }
+  .item-cb { width: 15px; height: 15px; cursor: pointer; accent-color: #059669; }
+  .right { text-align: right; }
+  .desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #475569; }
+  .mono { font-family: 'SF Mono', 'Consolas', monospace; }
+
+  .badge-taxcode { display: inline-flex; align-items: center; background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', 'Consolas', monospace;
+white-space: nowrap; }
+  .badge-taxcode.empty { background: #f8fafc; border-color: #e2e8f0; color: #94a3b8; font-weight: 400; }
+
+  .park-bar { display: none; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .park-bar.visible { display: flex; }
+  .park-bar-info { font-size: 15px; color: #475569; }
+  .park-bar-info strong { color: #059669; }
+  .btn-park { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 7px; font-family: inherit; box-shadow: 0 1px 3px
+rgba(5,150,105,0.3); }
+  .btn-park:hover { background: #047857; transform: translateY(-1px); }
+
+  /* ===== MODAL OVERLAY ===== */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.6); z-index: 100; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    max-width: 780px;
+    width: 96%;
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.18);
+    overflow: hidden;
+  }
+
+  /* ===== MODAL HEADER (fixed — tidak scroll) ===== */
+  .modal-header {
+    padding: 14px 20px 0;
+    flex-shrink: 0;
+    background: #ffffff;
+  }
+  /* Title row + balance bar — boleh wrap ke baris baru jika sempit */
+  .modal-header-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .modal-title { font-size: 15px; font-weight: 700; color: #1e293b; flex-shrink: 0; }
+  .modal-sub { font-size: 12px; color: #64748b; flex-shrink: 0; }
+
+  /* BALANCE BAR — fixed di header, tidak ikut scroll.
+     FIX: izinkan wrap ke 2 baris saat nominal sangat besar agar tidak
+     numpuk/bertabrakan. Cell value & status pill jadi flex-basis:100%
+     pada baris keduanya jika tidak cukup tempat. */
+  .balance-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    flex: 1;
+    min-width: 220px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #f8fafc;
+    min-height: 36px;
+  }
+  .balance-bar-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    border-right: 1px solid #e2e8f0;
+    border-bottom: 1px solid #e2e8f0;
+    min-width: 70px;
+    flex: 1 1 70px;
+  }
+  .balance-bar-cell:last-child { border-right: none; }
+  .balance-bar-label { font-size: 9px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.6px; line-height: 1; }
+  .balance-bar-val { font-size: 12px; font-weight: 700; font-family: 'SF Mono','Consolas',monospace; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; max-width: 100%; }
+  .balance-status-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 12px;
+    min-height: 28px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1 1 100%;
+    width: 100%;
+    border-top: 1.5px solid #e2e8f0;
+    transition: background 0.2s, color 0.2s;
+  }
+  .balance-status-pill.ok   { background: #f0fdf4; color: #166534; }
+  .balance-status-pill.err  { background: #fef2f2; color: #991b1b; }
+  .balance-status-pill.idle { background: #f8fafc; color: #94a3b8; }
+  .balance-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .balance-dot.ok   { background: #22c55e; }
+  .balance-dot.err  { background: #ef4444; }
+  .balance-dot.idle { background: #cbd5e1; }
+
+  /* ===== MODAL TABS ===== */
+  .modal-tabs {
+    display: flex;
+    border-bottom: 2px solid #e2e8f0;
+    padding: 0 20px;
+    gap: 0;
+    flex-shrink: 0;
+    background: #ffffff;
+    overflow-x: auto;
+  }
+  .modal-tab {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #64748b;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .modal-tab:hover { color: #059669; }
+  .modal-tab.active { color: #059669; border-bottom-color: #059669; }
+  .modal-tab-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: #dcfce7; color: #166534;
+    font-size: 10px; font-weight: 700;
+    min-width: 17px; height: 17px;
+    border-radius: 9px; padding: 0 4px;
+    margin-left: 5px;
+  }
+  .modal-tab.active .modal-tab-badge { background: #059669; color: #ffffff; }
+
+  /* ===== MODAL BODY (scrollable — hanya konten tab) ===== */
+  .modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 20px;
+    min-height: 0;
+  }
+
+  /* ===== TAB PANELS ===== */
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ===== MODAL FOOTER (fixed) ===== */
+  .modal-footer {
+    padding: 10px 20px;
+    border-top: 1px solid #e2e8f0;
+    background: #f8fafc;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* ===== FORM GROUPS — compact ===== */
+  .modal-form-group { margin-bottom: 10px; }
+  .modal-form-group label { display: block; font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 4px; }
+  .modal-form-group label .req { color: #dc2626; }
+  .modal-input { width: 100%; padding: 7px 11px; font-size: 13px; color: #1e293b; background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 7px; outline: none; font-family: inherit; transition: border-color 0.2s ease; }
+  .modal-input:focus { border-color: #059669; box-shadow: 0 0 0 2px rgba(5,150,105,0.10); }
+  .modal-input::placeholder { color: #b0bcc8; }
+  .modal-input.field-error { border-color: #fca5a5 !important; background: #fff5f5 !important; }
+  .modal-input.field-ok { border-color: #6ee7b7 !important; }
+
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .form-hint { display: none; } /* Sembunyikan semua hint */
+
+  /* ===== WARN BOX ===== */
+  .modal-warn { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #b45309; margin-bottom: 8px; display: flex; gap: 8px; align-items: flex-start; }
+  .modal-warn-items-missing { display: none; }
+  .modal-warn-items-missing.show { display: flex; }
+
+  /* ===== ITEMS TAB — editable grid ===== */
+  .items-tab-grid { border: 1px solid #e2e8f0; border-radius: 8px; overflow-x: auto; }
+  .items-tab-thead {
+    display: grid;
+    grid-template-columns: 28px 1fr 90px 110px 45px 110px 100px;
+    min-width: 720px;
+    gap: 8px;
+    padding: 9px 12px;
+    background: #f1f5f9;
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .items-tab-row {
+    display: grid;
+    grid-template-columns: 28px 1fr 90px 110px 45px 110px 100px;
+    min-width: 720px;
+    gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    align-items: center;
+    font-size: 12px;
+    transition: background 0.1s ease;
+  }
+  .items-tab-row:last-child { border-bottom: none; }
+  .items-tab-row:hover { background: #f8fafc; }
+  .items-row-num { color: #94a3b8; font-size: 11px; font-weight: 600; }
+  .items-row-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .items-row-desc-main { font-weight: 600; color: #1e293b; font-size: 12px; }
+  .items-row-desc-sub { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', 'Consolas', monospace; }
+
+  /* Inline editable input di items grid */
+  .items-inline-input {
+    width: 100%;
+    padding: 5px 7px;
+    font-size: 12px;
+    font-family: 'SF Mono', 'Consolas', monospace;
+    font-weight: 600;
+    color: #1e293b;
+    background: #ffffff;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 6px;
+    outline: none;
+    text-align: right;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .items-inline-input:focus { border-color: #059669; box-shadow: 0 0 0 2px rgba(5,150,105,0.12); }
+  .items-inline-select {
+    width: 100%;
+    padding: 5px 6px;
+    font-size: 11px;
+    font-family: 'SF Mono', 'Consolas', monospace;
+    font-weight: 600;
+    color: #1d4ed8;
+    background: #eff6ff;
+    border: 1.5px solid #bfdbfe;
+    border-radius: 6px;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .items-inline-select:focus { border-color: #059669; box-shadow: 0 0 0 2px rgba(5,150,105,0.12); }
+
+  /* Items tab total bar */
+  .items-total-bar { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 10px 12px; background: #f8fafc; border-top: 1px solid #e2e8f0; font-size: 13px; font-weight: 600; color: #475569; }
+  .items-total-val { font-size: 16px; font-weight: 700; color: #059669; font-family: 'SF Mono', 'Consolas', monospace; }
+
+  /* ===== OPTIONAL TOGGLE ===== */
+  .modal-optional-toggle { font-size: 12px; color: #4f46e5; cursor: pointer; text-decoration: underline; display: inline-block; margin-bottom: 6px; user-select: none; }
+  .modal-optional-field { display: none; }
+  .modal-optional-field.show { display: block; }
+
+  /* ===== PARK BUTTON DISABLED ===== */
+  #btnParkInvoice:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; box-shadow: none !important; background: #94a3b8 !important; }
+
+  /* ===== PAGE FOOTER ===== */
+  .page-footer { text-align: center; padding: 20px; margin-top: 10px; font-size: 11px; color: #94a3b8; }
+  .page-footer .footer-line { width: 60px; height: 1px; background: linear-gradient(90deg, transparent, #cbd5e1, transparent); margin: 0 auto 10px; }
+
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+  .animate-in { animation: fadeInUp 0.4s ease-out; }
+
+  @media (max-width: 768px) {
+    .po-items-thead, .po-item-row { grid-template-columns: 24px 50px 1fr 50px 50px 36px 70px 70px 45px 45px 90px; font-size: 11px; }
+    .form-row { grid-template-columns: 1fr; }
+    .items-tab-thead, .items-tab-row { grid-template-columns: 28px 200px 100px 110px 45px 120px 110px; }
+  }
+  @media (max-width: 600px) {
+    .app-content { padding: 16px; }
+    .page-header h1 { font-size: 20px; }
+    .btn { width: 100%; justify-content: center; }
+    .modal-tabs { overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <%@include file="sidebar.htm" %>
+
+  <main class="app-main">
+    <div class="page-header">
+      <h1 class="text-3xl font-bold text-slate-800 tracking-tight">List GR Not Invoice</h1>
+      <p class="text-slate-500 mt-1 text-sm">Purchase Orders with completed Goods Receipt, pending invoice</p>
+    </div>
+    <div class="app-content">
+
+  <div class="card animate-in">
+        <div class="card-body">
+
+      <% IF lt_outstanding IS INITIAL. %>
+      <div class="empty-state">
+        <span class="empty-state-icon">🎉</span>
+        <div class="empty-state-title">Semua PO Sudah Ditagihkan</div>
+        <div class="empty-state-sub">Tidak ada PO dengan GR outstanding yang belum diinvoice.</div>
+      </div>
+
+      <% ELSE. %>
+
+      <div class="filter-bar-unified">
+        <div class="filter-unified-search">
+          <span class="filter-search-icon">🔍</span>
+          <input type="text" id="filterUnified"
+                 placeholder="Cari Nama Vendor, No PO, Item, No GR, No SES, Tanggal, atau Deskripsi..."
+                 oninput="filterData()"/>
+          <button type="button" class="filter-clear-btn" id="filterClearBtn" onclick="clearFilters()" title="Reset pencarian">✕</button>
+        </div>
+        <div class="filter-actions-row">
+          <select id="perPageSelect"
+                  class="bg-white border border-slate-300 text-slate-600 text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block px-3 py-2 cursor-pointer shadow-sm outline-none transition-all"
+                  onchange="changePerPage(this.value)">
+            <option value="5">5 Item / Hal</option>
+            <option value="10">10 Item / Hal</option>
+            <option value="20">20 Item / Hal</option>
+            <option value="30">30 Item / Hal</option>
+          </select>
+
+          <button type="button" onclick="toggleAllAccordions()" id="btnToggleAll"
+                  class="bg-slate-700 hover:bg-slate-800 text-white font-medium py-2 px-4 rounded-lg shadow-md
+                         transition-all duration-200 text-sm flex items-center gap-2 active:scale-95">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+              Expand All
+          </button>
+        </div>
+      </div>
+
+      <div class="summary-bar">
+        <div class="summary-item">
+          <div class="summary-label">Total Vendor</div>
+          <div class="summary-value" id="summaryVendor"><%= lv_total_vendors %></div>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-item">
+          <div class="summary-label">Total Item</div>
+          <div class="summary-value" id="summaryItem"><%= lv_list_count %></div>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-item">
+          <div class="summary-label">Ditampilkan</div>
+          <div class="summary-value" id="summaryVisible"><%= lv_list_count %></div>
+        </div>
+      </div>
+
+      <div class="park-bar" id="parkBar">
+        <div class="park-bar-info">
+          <strong id="parkCount">0</strong> item dipilih — Total: <strong id="parkTotal" style="color:#059669;">IDR 0</strong>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <button class="btn-park" onclick="openUploadModal()">Input Data Invoice</button>
+          <button class="btn btn-secondary btn-sm" onclick="clearAllSelection()" style="color:#dc2626;border-color:#fecaca;">✖ Batal Pilih</button>
+        </div>
+      </div>
+
+      <%
+        DATA: lv_prev_lifnr TYPE ekko-lifnr,
+              lv_prev_ebeln  TYPE ekko-ebeln,
+              lv_cur_vidx    TYPE i,
+              lv_cur_pidx    TYPE i,
+              ls_cur_vstat   TYPE ty_vendor_stats,
+              ls_cur_pstat   TYPE ty_po_stats.
+        CLEAR: lv_prev_lifnr, lv_prev_ebeln, lv_cur_vidx, lv_cur_pidx.
+      %>
+
+      <% LOOP AT lt_outstanding ASSIGNING FIELD-SYMBOL(<ls_outs>). %>
+
+        <% IF <ls_outs>-lifnr <> lv_prev_lifnr. %>
+          <% IF lv_prev_ebeln IS NOT INITIAL. %>
+            </div></div>
+          <% ENDIF. %>
+          <% IF lv_prev_lifnr IS NOT INITIAL. %>
+            </div></div>
+          <% ENDIF. %>
+          <%
+            READ TABLE lt_vnd_stats ASSIGNING FIELD-SYMBOL(<ls_cv>)
+              WITH KEY lifnr = <ls_outs>-lifnr.
+            IF sy-subrc = 0.
+              lv_cur_vidx = <ls_cv>-idx.
+            ENDIF.
+            lv_prev_lifnr = <ls_outs>-lifnr.
+            CLEAR lv_prev_ebeln.
+            lv_cur_pidx = 0.
+          %>
+          <div class="accordion-vendor" id="vendor_<%= lv_cur_vidx %>"
+               data-vendor-name="<%= <ls_outs>-name1 %>"
+               data-vendor-lifnr="<%= <ls_outs>-lifnr %>">
+            <div class="accordion-vendor-header" onclick="toggleVendor('<%= lv_cur_vidx %>')">
+              <span class="acc-chevron">▶</span>
+              <input type="checkbox" class="acc-vendor-cb" id="vcb_<%= lv_cur_vidx %>"
+                     onclick="event.stopPropagation();"
+                     onchange="selectAllVendor('<%= lv_cur_vidx %>', this.checked)" title="Pilih semua item vendor ini"/>
+              <span class="acc-vendor-name">
+                <%= <ls_outs>-name1 %>
+                <%
+                DATA lv_lifnr_disp TYPE string.
+                lv_lifnr_disp = <ls_outs>-lifnr.
+                SHIFT lv_lifnr_disp LEFT DELETING LEADING '0'.
+              %>
+              <span class="acc-vendor-id">(<%= lv_lifnr_disp %>)</span>
+              </span>
+              <div class="acc-vendor-stats">
+                <span class="acc-stat"><strong><%= <ls_cv>-po_cnt %></strong> PO</span>
+                <span class="acc-stat"><strong><%= <ls_cv>-item_cnt %></strong> Item</span>
+              </div>
+            </div>
+            <div class="accordion-vendor-body" id="vbody_<%= lv_cur_vidx %>">
+        <% ENDIF. %>
+
+        <% IF <ls_outs>-ebeln <> lv_prev_ebeln. %>
+          <% IF lv_prev_ebeln IS NOT INITIAL. %>
+            </div></div>
+          <% ENDIF. %>
+          <%
+            READ TABLE lt_po_stats ASSIGNING FIELD-SYMBOL(<ls_cp>)
+              WITH KEY ebeln = <ls_outs>-ebeln.
+            IF sy-subrc = 0.
+              lv_cur_pidx = <ls_cp>-idx.
+            ENDIF.
+            lv_prev_ebeln = <ls_outs>-ebeln.
+            DATA lv_ebeln_disp TYPE string.
+            lv_ebeln_disp = <ls_outs>-ebeln.
+            SHIFT lv_ebeln_disp LEFT DELETING LEADING '0'.
+          %>
+          <div class="po-group" id="pogrp_<%= lv_cur_vidx %>_<%= lv_cur_pidx %>"
+               data-ebeln="<%= <ls_outs>-ebeln %>" data-bedat="<%= <ls_outs>-bedat %>">
+            <div class="po-group-header">
+              <input type="checkbox" class="po-group-cb" id="pocb_<%= lv_cur_vidx %>_<%= lv_cur_pidx %>"
+                     onclick="selectAllPO('<%= lv_cur_vidx %>_<%= lv_cur_pidx %>', this.checked)" title="Pilih semua item PO ini"/>
+              <span class="po-group-num">PO <%= lv_ebeln_disp %></span>
+              <span class="po-group-date">Tgl: <%= <ls_outs>-bedat+6(2) %>.<%= <ls_outs>-bedat+4(2) %>.<%= <ls_outs>-bedat+0(4) %></span>
+              <% IF <ls_outs>-zterm IS NOT INITIAL. %>
+              <span class="po-group-zterm" title="Payment Term">🗓 <%= <ls_outs>-zterm %></span>
+              <% ELSE. %>
+              <span class="po-group-zterm empty" title="Payment Term tidak diset">No Term</span>
+              <% ENDIF. %>
+              <span class="po-group-val"><%= <ls_outs>-waers %> <%= <ls_cp>-val_sum %></span>
+            </div>
+            <div class="po-items-thead">
+              <span></span>
+              <span>Item</span>
+              <span>Deskripsi</span>
+              <span class="right">Qty GR</span>
+              <span class="right">IR</span>
+              <span class="right">Sat</span>
+              <span class="right">Harga Sat.</span>
+              <span class="right">Nilai Open</span>
+              <span>Tax</span>
+              <span>Term</span>
+              <span>No GR / SES Ref</span>
+            </div>
+            <div class="po-items" id="poitems_<%= lv_cur_vidx %>_<%= lv_cur_pidx %>">
+        <% ENDIF. %>
+
+        <%
+          DATA lv_row_key TYPE string.
+          IF <ls_outs>-is_ses = abap_true AND <ls_outs>-lfbnr IS NOT INITIAL.
+            lv_row_key = <ls_outs>-lfbnr.
+            SHIFT lv_row_key LEFT DELETING LEADING '0'.
+          ELSEIF <ls_outs>-mblnr IS NOT INITIAL.
+            lv_row_key = <ls_outs>-mblnr.
+            SHIFT lv_row_key LEFT DELETING LEADING '0'.
+          ELSE.
+            lv_row_key = <ls_outs>-ebelp.
+          ENDIF.
+        %>
+        <div class="po-item-row<% IF <ls_outs>-is_ses = abap_true. %> ses-row<% ENDIF. %>"
+             data-ebeln="<%= <ls_outs>-ebeln %>"
+             data-ebelp="<%= <ls_outs>-ebelp %>"
+             data-bedat="<%= <ls_outs>-bedat %>"
+             data-txz01="<%= <ls_outs>-txz01 %>"
+             data-mblnr="<%= <ls_outs>-mblnr %>"
+             data-lfbnr="<%= <ls_outs>-lfbnr %>"
+             data-ses-xblnr="<%= <ls_outs>-ses_xblnr %>">
+          <div class="item-col">
+            <input type="checkbox" class="item-cb"
+                   id="icb_<%= <ls_outs>-ebeln %>_<%= lv_row_key %>"
+                   data-vendor="<%= lv_cur_vidx %>"
+                   data-lifnr="<%= <ls_outs>-lifnr %>"
+                   data-po="<%= lv_cur_vidx %>_<%= lv_cur_pidx %>"
+                   data-ebeln="<%= <ls_outs>-ebeln %>"
+                   data-ebelp="<%= <ls_outs>-ebelp %>"
+                   data-bukrs="<%= <ls_outs>-bukrs %>"
+                   data-qty="<%= <ls_outs>-qty_open %>"
+                   data-unit="<%= <ls_outs>-meins %>"
+                   data-lfbnr="<%= <ls_outs>-lfbnr %>"
+                   data-is-ses="<% IF <ls_outs>-is_ses = abap_true. %>X<% ENDIF. %>"
+                   <%
+                    DATA lv_val_str TYPE string.
+                    DATA lv_val_c   TYPE c LENGTH 30.
+                    WRITE <ls_outs>-val_open TO lv_val_c CURRENCY <ls_outs>-waers.
+                    lv_val_str = lv_val_c.
+                    CONDENSE lv_val_str.
+                    REPLACE ALL OCCURRENCES OF '.' IN lv_val_str WITH ''.
+                    REPLACE ALL OCCURRENCES OF ',' IN lv_val_str WITH '.'.
+                   %>
+                   data-amount="<%= lv_val_str %>"
+                   data-mblnr="<%= <ls_outs>-mblnr %>"
+                   data-mjahr="<%= <ls_outs>-mjahr %>"
+                   data-buzei="<%= <ls_outs>-buzei %>"
+                   data-mwskz="<%= <ls_outs>-mwskz %>"
+                   data-zterm="<%= <ls_outs>-zterm %>"
+                   data-waers="<%= <ls_outs>-waers %>"
+                   data-desc="<%= <ls_outs>-txz01 %>"
+                   onchange="onItemCheck()"/>
+          </div>
+          <div class="item-col mono">
+            <%= <ls_outs>-ebelp + 0 %>
+            <% IF <ls_outs>-is_ses = abap_true. %>
+            <div style="font-size:9px;font-weight:700;color:#7c3aed;background:#f5f3ff;
+                  border:1px solid #ddd6fe;border-radius:3px;padding:1px 4px;
+                  margin-top:2px;white-space:nowrap;display:inline-block;">SES</div>
+            <% ENDIF. %>
+          </div>
+          <div class="item-col desc" title="<%= <ls_outs>-txz01 %>"><%= <ls_outs>-txz01 %></div>
+          <div class="item-col right mono"><%
+            DATA lv_qgr_disp TYPE c LENGTH 20.
+            DATA lv_qgr_str  TYPE string.
+            WRITE <ls_outs>-qty_gr TO lv_qgr_disp DECIMALS 3.
+            lv_qgr_str = lv_qgr_disp.
+            CONDENSE lv_qgr_str.
+            IF lv_qgr_str CS ','.
+              REPLACE ALL OCCURRENCES OF REGEX ',0+$' IN lv_qgr_str WITH ''.
+              REPLACE ALL OCCURRENCES OF REGEX ',(.*[^0])0+$' IN lv_qgr_str WITH ',$1'.
+            ENDIF.
+            %><%= lv_qgr_str %></div>
+          <div class="item-col right mono"><%
+            IF <ls_outs>-is_ses = abap_false.
+          %><span style="font-size:10px;font-weight:600;color:#059669;
+               background:#d1fae5;border:1px solid #6ee7b7;border-radius:3px;
+               padding:1px 5px;white-space:nowrap;">Open</span><%
+            ELSE.
+              DATA lv_qir_disp TYPE c LENGTH 20.
+              DATA lv_qir_str  TYPE string.
+              WRITE <ls_outs>-qty_ir TO lv_qir_disp DECIMALS 3.
+              lv_qir_str = lv_qir_disp.
+              CONDENSE lv_qir_str.
+              IF lv_qir_str CS ','.
+                REPLACE ALL OCCURRENCES OF REGEX ',0+$' IN lv_qir_str WITH ''.
+                REPLACE ALL OCCURRENCES OF REGEX ',(.*[^0])0+$' IN lv_qir_str WITH ',$1'.
+              ENDIF.
+          %><%= lv_qir_str %><%
+            ENDIF.
+          %></div>
+          <div class="item-col right"><%= <ls_outs>-meins %></div>
+          <%
+            DATA lv_netpr_c  TYPE c LENGTH 30.
+            DATA lv_netpr_s  TYPE string.
+            DATA lv_peinh_s  TYPE string.
+            WRITE <ls_outs>-netpr TO lv_netpr_c CURRENCY <ls_outs>-waers.
+            lv_netpr_s = lv_netpr_c.
+            CONDENSE lv_netpr_s.
+            IF <ls_outs>-peinh > 1.
+              lv_peinh_s = <ls_outs>-peinh.
+              CONDENSE lv_peinh_s.
+            ENDIF.
+          %>
+          <div class="item-col right" style="color:#475569;font-family:'SF Mono','Consolas',monospace;font-size:11px;" title="Harga Satuan dari PO">
+            <%= lv_netpr_s %>
+            <% IF <ls_outs>-peinh > 1. %>
+            <span style="color:#94a3b8;font-size:10px;">/<%=lv_peinh_s%></span>
+            <% ENDIF. %>
+          </div>
+          <div class="item-col right val-highlight">
+            <%= <ls_outs>-waers %>
+            <%
+              DATA lv_disp_c  TYPE c LENGTH 30.
+              DATA lv_disp_s  TYPE string.
+              WRITE <ls_outs>-val_open TO lv_disp_c CURRENCY <ls_outs>-waers.
+              lv_disp_s = lv_disp_c.
+              CONDENSE lv_disp_s.
+            %>
+            <%= lv_disp_s %>
+          </div>
+          <div class="item-col">
+            <% IF <ls_outs>-mwskz IS NOT INITIAL. %>
+            <span class="badge-taxcode" title="Tax Code dari PO"><%= <ls_outs>-mwskz %></span>
+            <% ELSE. %>
+            <span class="badge-taxcode empty">—</span>
+            <% ENDIF. %>
+          </div>
+          <div class="item-col">
+            <% IF <ls_outs>-zterm IS NOT INITIAL. %>
+            <span class="po-group-zterm" title="Payment Term dari PO" style="font-size:10px;padding:2px 5px;"><%= <ls_outs>-zterm %></span>
+            <% ELSE. %>
+            <span style="color:#cbd5e1;font-size:11px;">—</span>
+            <% ENDIF. %>
+          </div>
+          <%
+            DATA lv_doc_ref   TYPE string.
+            DATA lv_doc_label TYPE string.
+            DATA lv_doc_title TYPE string.
+            IF <ls_outs>-ses_xblnr IS NOT INITIAL.
+              lv_doc_ref   = <ls_outs>-ses_xblnr.
+              lv_doc_label = 'SES'.
+              lv_doc_title = 'SES Delivery Note / Reference'.
+            ELSEIF <ls_outs>-lfbnr IS NOT INITIAL.
+              lv_doc_ref   = <ls_outs>-lfbnr.
+              SHIFT lv_doc_ref LEFT DELETING LEADING '0'.
+              lv_doc_label = 'SES#'.
+              lv_doc_title = 'No. SES (Service Entry Sheet)'.
+            ELSEIF <ls_outs>-mblnr IS NOT INITIAL.
+              lv_doc_ref   = <ls_outs>-mblnr.
+              lv_doc_label = 'GR'.
+              lv_doc_title = 'GR Material Document'.
+            ENDIF.
+          %>
+          <div class="item-col" style="font-size:11px; color:#64748b;" title="<%= lv_doc_title %>">
+            <% IF lv_doc_ref IS NOT INITIAL. %>
+            <span style="font-size:9px;font-weight:700;background:#f1f5f9;border:1px solid #e2e8f0;
+                  border-radius:3px;padding:1px 4px;color:#64748b;margin-right:3px;white-space:nowrap;">
+              <%= lv_doc_label %>
+            </span>
+            <span style="font-family:'SF Mono','Consolas',monospace;font-size:11px;"><%= lv_doc_ref %></span>
+            <% ELSE. %>
+            <span style="color:#cbd5e1;">—</span>
+            <% ENDIF. %>
+          </div>
+        </div>
+
+      <% ENDLOOP. %>
+
+      <% IF lv_prev_ebeln IS NOT INITIAL. %>
+        </div></div>
+      <% ENDIF. %>
+      <% IF lv_prev_lifnr IS NOT INITIAL. %>
+        </div></div>
+      <% ENDIF. %>
+
+      <div class="pagination" id="paginationBar"></div>
+
+      <% ENDIF. %>
+    </div>
+  </div>
+
+  <div class="page-footer">
+    <div class="footer-line"></div>
+    AP Invoice Module &mdash; SAP BSP Application
+  </div>
+
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="uploadModal">
+  <div class="modal-box" style="max-width: 500px;">
+    <div class="modal-header">
+      <div class="modal-title">Upload Dokumen Pendukung</div>
+      <div class="modal-sub">Harap unggah dokumen wajib sebelum melanjutkan ke form Park Invoice.</div>
+    </div>
+    <div class="modal-body">
+
+      <div class="modal-warn" id="uploadErrorMsg" style="display:none; background:#fef2f2; border-color:#fca5a5; color:#991b1b;">
+        <span>❌ <strong>Error:</strong> Dokumen Invoice, GR, dan PO wajib diunggah!</span>
+      </div>
+
+      <div class="modal-form-group">
+        <label>Dokumen Invoice <span class="req">*</span></label>
+        <input type="file" id="file_inv" class="modal-input" accept=".pdf,.jpg,.jpeg,.png">
+      </div>
+      <div class="modal-form-group">
+        <label>Dokumen Goods Receipt (GR) <span class="req">*</span></label>
+        <input type="file" id="file_gr" class="modal-input" accept=".pdf,.jpg,.jpeg,.png">
+      </div>
+      <div class="modal-form-group">
+        <label>Dokumen Purchase Order (PO) <span class="req">*</span></label>
+        <input type="file" id="file_po" class="modal-input" accept=".pdf,.jpg,.jpeg,.png">
+      </div>
+      <div class="modal-form-group">
+        <label>Dokumen Faktur Pajak <span style="color:#64748b; font-weight:normal;">(Opsional)</span></label>
+        <input type="file" id="file_tax" class="modal-input" accept=".pdf,.jpg,.jpeg,.png">
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="validateAndUploadDocs()" style="flex:1;" id="btnProcessUpload">
+        ⬆️ Upload & Lanjutkan
+      </button>
+      <button class="btn btn-secondary" onclick="closeUploadModal()">Batal</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="parkModal">
+  <div class="modal-box">
+
+    <div class="modal-header">
+      <div class="modal-header-top">
+        <div>
+          <div class="modal-title">Park Invoice</div>
+          <div class="modal-sub" id="modalSubLine">0 item</div>
+        </div>
+        <div class="balance-bar" id="balanceBar">
+          <div class="balance-bar-cell">
+            <div class="balance-bar-label">Gross</div>
+            <div class="balance-bar-val" id="bp_gross">—</div>
+          </div>
+          <div class="balance-bar-cell">
+            <div class="balance-bar-label">DPP</div>
+            <div class="balance-bar-val" id="bp_items">—</div>
+          </div>
+          <div class="balance-bar-cell">
+            <div class="balance-bar-label">PPN</div>
+            <div class="balance-bar-val" id="bp_tax">—</div>
+          </div>
+          <div class="balance-status-pill idle" id="balanceStatusRow">
+            <span class="balance-dot idle" id="balanceDot"></span>
+            <span id="balanceStatusText">—</span>
+            <span style="margin-left:4px;font-size:11px;" id="balanceVal"></span>
+          </div>
+        </div>
+        <button onclick="closeParkModal()" style="flex-shrink:0;width:28px;height:28px;border:none;background:#f1f5f9;border-radius:6px;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;"
+title="Tutup">×</button>
+      </div>
+
+      <div class="modal-warn modal-warn-items-missing" id="warnMissingGR" style="padding:7px 12px;font-size:12px;margin-bottom:8px;">
+        <span>⚠️ Ada item tanpa GR doc — matching GR tidak dapat dilakukan.</span>
+      </div>
+
+      <div class="modal-tabs">
+        <div class="modal-tab active" id="tab_btn_basic"     onclick="switchTab('basic')">Basic Data</div>
+        <div class="modal-tab"        id="tab_btn_payment"   onclick="switchTab('payment')">Payment</div>
+        <div class="modal-tab"        id="tab_btn_items"     onclick="switchTab('items')">
+          Items <span class="modal-tab-badge" id="tabItemsBadge">0</span>
+        </div>
+        <div class="modal-tab"        id="tab_btn_glaccount" onclick="switchTab('glaccount')">G/L</div>
+        <div class="modal-tab"        id="tab_btn_wtax"      onclick="switchTab('wtax')">W/Tax</div>
+      </div>
+    </div>
+
+    <div class="modal-body">
+
+      <div class="tab-panel active" id="tab_basic">
+
+        <div class="form-row">
+          <div class="modal-form-group">
+            <label>Tgl Invoice <span class="req">*</span></label>
+            <input type="date" id="modal_inv_date" class="modal-input" onchange="onInvDateChange(); validateParkForm()"/>
+          </div>
+          <div class="modal-form-group">
+            <label>Tgl Posting <span class="req">*</span></label>
+            <input type="date" id="modal_pstng_date" class="modal-input" onchange="validateParkForm()"/>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="modal-form-group">
+            <label>No. Ref Invoice <span class="req">*</span></label>
+            <input type="text" id="modal_ref_doc" class="modal-input" maxlength="16"
+                   placeholder="INV/2026/00123"
+                   oninput="validateParkForm()"/>
+          </div>
+          <div class="modal-form-group">
+            <label>No. Faktur Pajak</label>
+            <input type="text" id="modal_no_faktur_pajak" class="modal-input" maxlength="30"
+                   placeholder="010.002-26.12345678"/>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="modal-form-group">
+            <label>Amount / Gross <span class="req">*</span></label>
+            <input type="text" id="modal_gross_amount" class="modal-input"
+                   placeholder="0"
+                   oninput="updateBalancePanel(); validateParkForm();"
+                   onchange="updateBalancePanel(); validateParkForm();"/>
+          </div>
+          <div class="modal-form-group" id="taxAmountGroup">
+            <label>Tax Amount</label>
+            <input type="text" id="modal_tax_amount" class="modal-input"
+                   placeholder="Auto"
+                   oninput="updateBalancePanel(); validateParkForm();"
+                   onchange="updateBalancePanel(); validateParkForm();"/>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="modal-form-group">
+            <label>Tax Code</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <select id="modal_tax_code" class="modal-input"
+                      style="flex:1;cursor:pointer;"
+                      onchange="onCalcTaxToggle(); syncItemsTaxCode();">
+                <option value="">— Tanpa Pajak —</option>
+                <optgroup label="PPN Masukan (Input Tax)">
+                  <option value="V0">V0 — 0%</option>
+                  <option value="V1">V1 — 11%</option>
+                  <option value="I0">I0 — 0%</option>
+                  <option value="I1">I1 — 1%</option>
+                  <option value="I2">I2 — 10%</option>
+                  <option value="I3">I3 — 11%</option>
+                  <option value="I4">I4 — 12%</option>
+                </optgroup>
+                <optgroup label="PPN Keluaran">
+                  <option value="O0">O0 — 0%</option>
+                  <option value="O1">O1 — 0% Ekspor</option>
+                  <option value="O2">O2 — 10%</option>
+                  <option value="O3">O3 — 11%</option>
+                  <option value="O4">O4 — 12%</option>
+                </optgroup>
+              </select>
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#475569;text-transform:none;letter-spacing:0;cursor:pointer;white-space:nowrap;font-weight:500;">
+                <input type="checkbox" id="modal_calc_tax" checked
+                       style="width:14px;height:14px;cursor:pointer;accent-color:#059669;" onchange="onCalcTaxToggle()"/>
+                Calc Tax
+              </label>
+            </div>
+          </div>
+          <div class="modal-form-group">
+            <label>Header Text</label>
+            <input type="text" id="modal_header_txt" class="modal-input" maxlength="25" placeholder="Keterangan (maks 25 karakter)"/>
+          </div>
+        </div>
+
+      </div><div class="tab-panel" id="tab_payment">
+
+        <div class="modal-form-group">
+          <label>Payment Term</label>
+          <select id="modal_pmnt_trms" class="modal-input" style="cursor:pointer;" onchange="onPaymentTermChange()">
+            <option value="">— Pilih Payment Term —</option>
+            <optgroup label="SAP Standard">
+              <option value="0001">0001 — Immediate</option>
+              <option value="0002">0002 — 14d 2%, 30 net</option>
+              <option value="0003">0003 — 14d 3%, 20/2%, 30 net</option>
+              <option value="0004">0004 — End of month</option>
+              <option value="0005">0005 — 10th of subs. month</option>
+              <option value="0006">0006 — EOM 4%, Mid 2%</option>
+              <option value="0007">0007 — 15th/31st subs.</option>
+              <option value="0008">0008 — 14d 2%, 30/1.5%, 45 net</option>
+              <option value="0009">0009 — 3 installments</option>
+              <option value="2000">2000 — Cash on Delivery</option>
+            </optgroup>
+            <optgroup label="Z — Custom">
+              <option value="Z001">Z001 — Cash (1 day)</option>
+              <option value="Z007">Z007 — 7 days</option>
+              <option value="Z014">Z014 — 14 days</option>
+              <option value="Z030">Z030 — 30 days</option>
+              <option value="Z045">Z045 — 45 days</option>
+              <option value="Z060">Z060 — 60 days</option>
+              <option value="Z090">Z090 — 90 days</option>
+              <option value="Z120">Z120 — 120 days</option>
+            </optgroup>
+          </select>
+          <div id="ztermDueDateHint" style="font-size:11px;margin-top:4px;color:#059669;font-weight:600;"></div>
+        </div>
+
+        <div class="form-row">
+          <div class="modal-form-group">
+            <label>Baseline Date</label>
+            <input type="date" id="modal_bsl_date" class="modal-input" onchange="onBslDateChange()"/>
+          </div>
+          <div class="modal-form-group">
+            <label>Payment Block</label>
+            <select id="modal_pmt_block" class="modal-input" style="cursor:pointer;">
+              <option value="">Free for Payment</option>
+              <option value="A">A — Blocked</option>
+              <option value="B">B — Quality Inspection</option>
+            </select>
+          </div>
+        </div>
+
+      </div><div class="tab-panel" id="tab_items">
+
+        <div class="items-tab-grid" id="itemsTabGrid">
+          </div>
+
+        <div class="items-total-bar">
+          <span>Total DPP:</span>
+          <span class="items-total-val" id="itemsTotalVal">IDR 0</span>
+        </div>
+
+      </div><div class="tab-panel" id="tab_glaccount">
+
+        <div id="glAccountRows">
+          </div>
+
+        <button type="button" class="btn btn-secondary" style="margin-top:8px;font-size:12px;"
+                onclick="addGLRow()">
+          + Tambah Baris G/L
+        </button>
+
+        <div class="items-total-bar" style="margin-top:12px;">
+          <span>Total G/L:</span>
+          <span class="items-total-val" id="glTotalVal">IDR 0</span>
+        </div>
+
+      </div><div class="tab-panel" id="tab_wtax">
+
+        <div class="items-tab-grid" style="overflow-x:auto;">
+          <div class="items-tab-thead" style="
+            display:grid;
+            grid-template-columns: 40px 1fr 120px 130px 130px 36px;
+            background:#f1f5f9;border-bottom:2px solid #e2e8f0;
+            padding:8px 10px;font-size:11px;font-weight:700;color:#64748b;
+            text-transform:uppercase;letter-spacing:.7px;gap:6px;">
+            <div>#</div>
+            <div>W/Tax Type &amp; Code</div>
+            <div style="text-align:right;">Base FC</div>
+            <div style="text-align:right;">Amt FC</div>
+            <div style="text-align:right;">%</div>
+            <div></div>
+          </div>
+          <div id="wtaxRows">
+            </div>
+        </div>
+
+        <button type="button" class="btn btn-secondary" style="margin-top:8px;font-size:12px;"
+                onclick="addWTaxRow()">
+          + Tambah W/Tax
+        </button>
+
+        <div class="items-total-bar" style="margin-top:12px;">
+          <span>Total W/Tax:</span>
+          <span class="items-total-val" id="wtaxTotalVal">IDR 0</span>
+        </div>
+
+      </div></div><div class="modal-footer">
+      <button class="btn btn-primary" id="btnParkInvoice" onclick="submitParkInvoice()" style="flex:1;">
+        ✔ Park Invoice
+      </button>
+      <button class="btn btn-secondary" onclick="closeParkModal()">Batal</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/* ======================================================================
+   CSRF TOKEN
+   ====================================================================== */
+function getCookie(name) {
+  var cookies = document.cookie.split(';');
+  for (var i = 0; i < cookies.length; i++) {
+    var c = cookies[i].trim();
+    if (c.indexOf(name + '=') === 0) return c.substring(name.length + 1);
+  }
+  return '';
+}
+function getCsrfToken() {
+  var token = getCookie('~csrf_token');
+  if (!token) token = getCookie('sap-xsrf-token');
+  if (!token) token = getCookie('X-CSRF-Token');
+  return token;
+}
+
+/* ======================================================================
+   UPLOAD DOKUMEN (PRE-PARK MODAL)
+   ====================================================================== */
+function openUploadModal() {
+  var chk = document.querySelectorAll('.item-cb:checked');
+  if (chk.length === 0) return;
+
+  // Reset form upload
+  document.getElementById('file_inv').value = '';
+  document.getElementById('file_gr').value  = '';
+  document.getElementById('file_po').value  = '';
+  document.getElementById('file_tax').value = '';
+  document.getElementById('uploadErrorMsg').style.display = 'none';
+
+  document.getElementById('uploadModal').classList.add('open');
+}
+
+function closeUploadModal() {
+  document.getElementById('uploadModal').classList.remove('open');
+}
+
+async function validateAndUploadDocs() {
+  var fileInv = document.getElementById('file_inv').files[0];
+  var fileGr  = document.getElementById('file_gr').files[0];
+  var filePo  = document.getElementById('file_po').files[0];
+  var fileTax = document.getElementById('file_tax').files[0];
+  var errMsg  = document.getElementById('uploadErrorMsg');
+
+  // VALIDASI DOKUMEN WAJIB
+  if (!fileInv || !fileGr || !filePo) {
+    errMsg.style.display = 'flex';
+    return;
+  }
+  errMsg.style.display = 'none';
+
+  var btn = document.getElementById('btnProcessUpload');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ Sedang Mengunggah...';
+
+  // FUNGSI 1: Konversi file mentah ke Base64 (untuk PDF / file non-gambar)
+  const toBase64 = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = error => reject(error);
+  });
+
+  // FUNGSI 2: Kompresi khusus gambar menggunakan Canvas
+  // maxWidth mengatur lebar maksimal gambar, quality mengatur tingkat kompresi (0.0 - 1.0)
+  const compressImage = (file, maxWidth = 1200, quality = 0.7) => new Promise((resolve, reject) => {
+    // Jika file bukan gambar (misal PDF), langsung konversi ke Base64 tanpa kompresi
+    if (!file.type.startsWith('image/')) {
+       return toBase64(file).then(resolve).catch(reject);
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = event => {
+      const img = new Image();
+      img.src = event.target.result;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        // Kalkulasi rasio aspek jika lebar melebihi batas maksimal
+        if (width > maxWidth) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Render kembali ke Data URL dengan kompresi
+        const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        const compressedDataUrl = canvas.toDataURL(mimeType, quality);
+
+        // Return hanya string Base64-nya saja (tanpa header 'data:image/jpeg;base64,')
+        resolve(compressedDataUrl.split(',')[1]);
+      };
+      img.onerror = error => reject(error);
+    };
+    reader.onerror = error => reject(error);
+  });
+
+  try {
+    var docsToUpload = [];
+
+    // Ganti pemanggilan toBase64() menjadi compressImage()
+    docsToUpload.push({ type: 'INV', name: fileInv.name, mime: fileInv.type, content: await compressImage(fileInv) });
+    docsToUpload.push({ type: 'GR',  name: fileGr.name,  mime: fileGr.type,  content: await compressImage(fileGr) });
+    docsToUpload.push({ type: 'PO',  name: filePo.name,  mime: filePo.type,  content: await compressImage(filePo) });
+    if (fileTax) {
+      docsToUpload.push({ type: 'TAX', name: fileTax.name, mime: fileTax.type, content: await compressImage(fileTax) });
+    }
+
+    // Ambil nomor PO pertama sebagai referensi
+    var chk = document.querySelectorAll('.item-cb:checked');
+    var refPo = chk[0].getAttribute('data-ebeln');
+
+    var formData = new FormData();
+    formData.append('action', 'upload_docs');
+    formData.append('ref_doc', refPo);
+    formData.append('docs_json', JSON.stringify(docsToUpload));
+    formData.append('~csrf_token', getCsrfToken());
+
+    // DEBUG 1: Gunakan window.location.href agar dinamis mengarah ke halaman yang sedang dibuka
+    let response = await fetch(window.location.href, {
+      method: 'POST',
+      body: formData
+    });
+
+    // DEBUG 2: Ambil response sebagai teks mentah terlebih dahulu untuk mengecek apakah SAP mengembalikan HTML Error
+    let rawText = await response.text();
+    console.log("Raw Response dari ABAP:", rawText);
+
+    if (!response.ok) {
+        throw new Error(`HTTP Error ${response.status}: Silakan cek tab Network (F12) untuk detailnya.`);
+    }
+
+    // DEBUG 3: Coba parse JSON secara manual
+    let result = JSON.parse(rawText);
+
+    if (result.status === 'success') {
+      closeUploadModal();
+      openParkModal();
+    } else {
+      alert('Gagal mengunggah dokumen: ' + result.message);
+    }
+  } catch (error) {
+    // DEBUG 4: Tampilkan error asli di Alert dan Console
+    alert('Terjadi kesalahan sistem:\n\n' + error.message);
+    console.error("Detail Error Upload:", error);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '⬆️ Upload & Lanjutkan';
+  }
+}
+
+
+/* ======================================================================
+   TAB SWITCHING
+   ====================================================================== */
+function switchTab(name) {
+  var tabs   = ['basic', 'payment', 'items', 'glaccount', 'wtax'];
+  tabs.forEach(function(t) {
+    var btn   = document.getElementById('tab_btn_' + t);
+    var panel = document.getElementById('tab_' + t);
+    if (btn)   btn.classList.toggle('active',   t === name);
+    if (panel) panel.classList.toggle('active', t === name);
+  });
+}
+
+/* ======================================================================
+   ACCORDION & CHECKBOX
+   ====================================================================== */
+function toggleVendor(idx) {
+  var el = document.getElementById('vendor_' + idx);
+  if (el) el.classList.toggle('open');
+}
+
+function selectAllVendor(idx, checked) {
+  var vendorEl = document.getElementById('vendor_' + idx);
+  if (!vendorEl) return;
+  vendorEl.querySelectorAll('.item-cb').forEach(function(cb) { cb.checked = checked; });
+  vendorEl.querySelectorAll('.po-group-cb').forEach(function(cb) { cb.checked = checked; cb.indeterminate = false; });
+  if (checked) vendorEl.classList.add('open');
+  onItemCheck();
+}
+
+function selectAllPO(poKey, checked) {
+  document.querySelectorAll('[data-po="' + poKey + '"]').forEach(function(cb) { cb.checked = checked; });
+  syncVendorCb(poKey.split('_')[0]);
+  onItemCheck();
+}
+
+function syncVendorCb(vIdx) {
+  var all  = document.querySelectorAll('#vendor_' + vIdx + ' .item-cb');
+  var chk  = document.querySelectorAll('#vendor_' + vIdx + ' .item-cb:checked');
+  var vcb  = document.getElementById('vcb_' + vIdx);
+  if (!vcb) return;
+  vcb.indeterminate = false;
+  if (chk.length === 0)               { vcb.checked = false; }
+  else if (chk.length === all.length) { vcb.checked = true; }
+  else                                { vcb.checked = false; vcb.indeterminate = true; }
+}
+
+function onItemCheck() {
+  var chk = document.querySelectorAll('.item-cb:checked');
+  document.getElementById('parkCount').textContent = chk.length;
+  var totalAmount = 0;
+  var currency = chk.length > 0 ? (chk[0].getAttribute('data-waers') || 'IDR') : 'IDR';
+  chk.forEach(function(cb) { totalAmount += parseFloat(cb.getAttribute('data-amount')) || 0; });
+  document.getElementById('parkTotal').textContent = currency + ' ' + totalAmount.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  document.getElementById('parkBar').classList.toggle('visible', chk.length > 0);
+  document.querySelectorAll('.accordion-vendor').forEach(function(v) {
+    var vIdx = v.id.replace('vendor_', '');
+    syncVendorCb(vIdx);
+    v.querySelectorAll('.po-group-cb').forEach(function(pocb) {
+      var pk      = pocb.id.replace('pocb_', '');
+      var items   = v.querySelectorAll('[data-po="' + pk + '"]');
+      var checked = v.querySelectorAll('[data-po="' + pk + '"]:checked');
+      pocb.indeterminate = false;
+      if (checked.length === 0)               { pocb.checked = false; }
+      else if (checked.length === items.length) { pocb.checked = true; }
+      else                                      { pocb.checked = false; pocb.indeterminate = true; }
+    });
+  });
+}
+
+function clearAllSelection() {
+  document.querySelectorAll('.item-cb:checked').forEach(function(cb)    { cb.checked = false; });
+  document.querySelectorAll('.po-group-cb:checked').forEach(function(cb) { cb.checked = false; cb.indeterminate = false; });
+  document.querySelectorAll('.acc-vendor-cb:checked').forEach(function(cb) { cb.checked = false; cb.indeterminate = false; });
+  onItemCheck();
+}
+
+/* ======================================================================
+   TOGGLE EXPAND ALL / COLLAPSE ALL
+   ====================================================================== */
+var allExpanded = false;
+function toggleAllAccordions() {
+  allExpanded = !allExpanded;
+  document.querySelectorAll('.accordion-vendor').forEach(function(vendor) {
+    if (allExpanded) vendor.classList.add('open');
+    else             vendor.classList.remove('open');
+  });
+  var btn = document.getElementById('btnToggleAll');
+  if (btn) {
+    btn.innerHTML = allExpanded
+      ? '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg> Collapse All'
+      : '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg> Expand All';
+  }
+}
+
+/* ======================================================================
+   TAX RATES (UPDATED with V0 & V1)
+   ====================================================================== */
+var TAX_RATES = {
+  '':   0,
+  'V0': 0,
+  'V1': 0.11,
+  'I0': 0,
+  'I1': 0.01,
+  'I2': 0.10,
+  'I3': 0.11,
+  'I4': 0.12,
+  'O0': 0,
+  'O1': 0,
+  'O2': 0.10,
+  'O3': 0.11,
+  'O4': 0.12
+};
+
+function getCurrency() {
+  var chk = document.querySelectorAll('.item-cb:checked');
+  return chk.length > 0 ? (chk[0].getAttribute('data-waers') || 'IDR') : 'IDR';
+}
+
+function fmtIDR(n) {
+  return getCurrency() + ' ' + n.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/* ======================================================================
+   ITEMS TAB — render editable grid
+   ====================================================================== */
+var itemsData = {};
+
+function buildItemsTab(checkedCbs) {
+  var grid = document.getElementById('itemsTabGrid');
+  if (!grid) return;
+
+  var html = '<div class="items-tab-thead">'
+    + '<span>#</span>'
+    + '<span>PO / Item — Deskripsi</span>'
+    + '<span class="right">Qty</span>'
+    + '<span class="right">Amount</span>'
+    + '<span>UoM</span>'
+    + '<span class="right">GR Doc</span>'
+    + '<span>Tax Code</span>'
+    + '</div>';
+
+  checkedCbs.forEach(function(cb, i) {
+    var ebeln  = cb.getAttribute('data-ebeln') || '';
+    var ebelp  = cb.getAttribute('data-ebelp') || '';
+    var lfbnr  = cb.getAttribute('data-lfbnr') || '';
+    var isSes  = cb.getAttribute('data-is-ses') || '';
+    var key    = ebeln + '_' + ebelp + (lfbnr ? '_' + lfbnr : '');
+    var desc   = cb.getAttribute('data-desc')  || '';
+    var qty    = itemsData[key] ? itemsData[key].qty    : (parseFloat(cb.getAttribute('data-qty'))    || 0);
+    var amount = itemsData[key] ? itemsData[key].amount : parseFloat(cb.getAttribute('data-amount')) || 0;
+    var unit   = cb.getAttribute('data-unit')  || '';
+    var mblnr  = cb.getAttribute('data-mblnr') || '';
+    var mwskz  = itemsData[key] ? itemsData[key].tax_code : (cb.getAttribute('data-mwskz') || '');
+
+    // Max Qty for GR-based IV validation
+    var maxQty = parseFloat(cb.getAttribute('data-qty')) || 0;
+
+    var ebelp_disp = String(parseInt(ebelp, 10) || ebelp);
+    var ebeln_disp = ebeln.replace(/^0+/, '') || ebeln;
+
+    html += '<div class="items-tab-row">'
+      + '<div class="items-row-num">' + (i + 1) + '</div>'
+      + '<div style="overflow:hidden;">'
+      +   '<div class="items-row-desc-main">' + ebeln_disp + ' / ' + ebelp_disp
+      +     (isSes ? ' <span style="font-size:9px;font-weight:700;color:#7c3aed;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:3px;padding:1px 4px;">SES</span>' : '')
+      +     (lfbnr ? ' <span style="font-size:9px;color:#94a3b8;font-family:monospace;">' + lfbnr.replace(/^0+/,'') + '</span>' : '')
+      +   '</div>'
+      +   '<div style="font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;" title="' + desc + '">' + desc + '</div>'
+      + '</div>'
+      + '<div><input type="text" class="items-inline-input" step="any" min="0"'
+      +   ' data-key="' + key + '" data-field="qty" data-maxqty="' + maxQty + '"'
+      +   ' value="' + qty.toLocaleString("id-ID", { maximumFractionDigits: 3 }) + '"'
+      +   ' oninput="onItemFieldChange(this)" onchange="onItemFieldChange(this)"/></div>'
+      + '<div><input type="text" class="items-inline-input" data-key="' + key + '" data-field="amount"'
+      +   ' value="' + amount.toLocaleString("id-ID", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '"'
+      +   ' style="text-align:right;"'
+      +   ' oninput="onItemAmountInput(this)" onchange="onItemAmountInput(this)"/></div>'
+      + '<div style="text-align:center;font-size:11px;color:#64748b;font-weight:600;">' + unit + '</div>'
+      + '<div style="text-align:right;font-size:10px;color:#94a3b8;font-family:Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (mblnr||'') + '">' + (mblnr || '—') + '</div>'
+      + '<div><select class="items-inline-select" data-key="' + key + '" data-field="tax_code"'
+      +   ' onchange="onItemFieldChange(this)">'
+      +   buildTaxOptions(mwskz)
+      + '</select></div>'
+      + '</div>';
+  });
+
+  grid.innerHTML = html;
+  updateItemsTotal();
+}
+
+function buildTaxOptions(selected) {
+  var opts = [
+    { v: '',   l: '— (none)' },
+    { v: 'V0', l: 'V0 0%'   },
+    { v: 'V1', l: 'V1 11%'  },
+    { v: 'I0', l: 'I0 0%'   },
+    { v: 'I1', l: 'I1 1%'   },
+    { v: 'I2', l: 'I2 10%'  },
+    { v: 'I3', l: 'I3 11%'  },
+    { v: 'I4', l: 'I4 12%'  },
+    { v: 'O0', l: 'O0 0%'   },
+    { v: 'O1', l: 'O1 0%X'  },
+    { v: 'O2', l: 'O2 10%'  },
+    { v: 'O3', l: 'O3 11%'  },
+    { v: 'O4', l: 'O4 12%'  }
+  ];
+  return opts.map(function(o) {
+    return '<option value="' + o.v + '"' + (o.v === selected ? ' selected' : '') + '>' + o.l + '</option>';
+  }).join('');
+}
+
+/* Pengecekan Qty & Amount Saat Diedit (GR Blocking Logic) */
+function onItemFieldChange(el) {
+  var key   = el.getAttribute('data-key');
+  var field = el.getAttribute('data-field');
+  if (!itemsData[key]) itemsData[key] = {};
+
+  if (field === 'qty') {
+    var rawQty = el.value.replace(/\./g, '').replace(',', '.');
+    var parsedQty = parseFloat(rawQty) || 0;
+    itemsData[key].qty = parsedQty;
+
+    // Partial GR Blocking Check
+    var maxQty = parseFloat(el.getAttribute('data-maxqty')) || 0;
+    if (parsedQty > maxQty) {
+      el.style.borderColor = '#ef4444';
+      el.style.backgroundColor = '#fef2f2';
+      el.title = 'Kuantitas Invoice melebihi Open Qty GR (Maks: ' + maxQty + ')';
+    } else {
+      el.style.borderColor = '';
+      el.style.backgroundColor = '';
+      el.title = '';
+    }
+  } else if (field === 'tax_code') {
+    itemsData[key].tax_code = el.value;
+  }
+  updateItemsTotal();
+  updateBalancePanel();
+}
+
+function onItemAmountInput(el) {
+  var key = el.getAttribute('data-key');
+  var raw = el.value.replace(/[^0-9.,]/g, '').replace(/\./g, '').replace(',', '.');
+  var num = parseFloat(raw) || 0;
+  if (!itemsData[key]) itemsData[key] = {};
+  itemsData[key].amount = num;
+  updateItemsTotal();
+  updateBalancePanel();
+}
+
+function updateItemsTotal() {
+  var total = 0;
+  var chk   = document.querySelectorAll('.item-cb:checked');
+  chk.forEach(function(cb) {
+    var lfbnr = cb.getAttribute('data-lfbnr') || '';
+    var key = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+    if (itemsData[key] && itemsData[key].amount !== undefined) {
+      total += itemsData[key].amount;
+    } else {
+      total += parseFloat(cb.getAttribute('data-amount')) || 0;
+    }
+  });
+  var el = document.getElementById('itemsTotalVal');
+  if (el) el.textContent = getCurrency() + ' ' + total.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function syncItemsTaxCode() {
+  var globalCode = document.getElementById('modal_tax_code').value;
+  var chk = document.querySelectorAll('.item-cb:checked');
+  chk.forEach(function(cb) {
+    var lfbnr = cb.getAttribute('data-lfbnr') || '';
+    var key = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+    if (!itemsData[key]) itemsData[key] = {};
+    itemsData[key].tax_code = globalCode;
+  });
+  document.querySelectorAll('#itemsTabGrid .items-inline-select[data-field="tax_code"]').forEach(function(sel) {
+    sel.value = globalCode;
+  });
+  updateBalancePanel();
+}
+
+/* ======================================================================
+   OPEN / CLOSE MODAL
+   ====================================================================== */
+function openParkModal() {
+  var chk = document.querySelectorAll('.item-cb:checked');
+  if (chk.length === 0) return;
+
+  var firstLifnr = chk[0].getAttribute('data-lifnr') || '';
+  var vendorSet  = {};
+  chk.forEach(function(cb) { vendorSet[cb.getAttribute('data-lifnr') || ''] = true; });
+  if (Object.keys(vendorSet).length > 1) {
+    alert('Item yang dipilih berasal dari ' + Object.keys(vendorSet).length + ' vendor berbeda.\n\nInvoice hanya bisa dipark untuk 1 vendor saja.\nSilakan pilih item dari vendor yang sama.');
+    return;
+  }
+
+  itemsData = {};
+  chk.forEach(function(cb) {
+    var lfbnr = cb.getAttribute('data-lfbnr') || '';
+    var key = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+    itemsData[key] = {
+      qty:      parseFloat(cb.getAttribute('data-qty'))    || 0,
+      amount:   parseFloat(cb.getAttribute('data-amount')) || 0,
+      tax_code: cb.getAttribute('data-mwskz') || ''
+    };
+  });
+
+  var badge = document.getElementById('tabItemsBadge');
+  if (badge) badge.textContent = chk.length;
+
+  var hasMissingGR = false;
+  var totalAmount  = 0;
+  var currency     = chk.length > 0 ? (chk[0].getAttribute('data-waers') || 'IDR') : 'IDR';
+  chk.forEach(function(cb, i) {
+    var mblnr  = cb.getAttribute('data-mblnr') || '';
+    var amount = parseFloat(cb.getAttribute('data-amount')) || 0;
+    totalAmount += amount;
+    if (!mblnr) hasMissingGR = true;
+  });
+  document.getElementById('modalSubLine').textContent = chk.length + ' item — vendor ' + (chk[0].getAttribute('data-lifnr') || '').replace(/^0+/, '') + ' — ' + currency + ' ' + totalAmount.toLocaleString('id-ID', { minimumFractionDigits: 2,
+maximumFractionDigits: 2 });
+
+  var warn = document.getElementById('warnMissingGR');
+  if (hasMissingGR) warn.classList.add('show'); else warn.classList.remove('show');
+
+  var today   = new Date();
+  var todayStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  var invEl  = document.getElementById('modal_inv_date');
+  var pstEl  = document.getElementById('modal_pstng_date');
+  var bslEl  = document.getElementById('modal_bsl_date');
+  if (invEl && !invEl.value) invEl.value = todayStr;
+  if (pstEl && !pstEl.value) pstEl.value = todayStr;
+  if (bslEl) {
+    bslEl.removeAttribute('data-manual');
+    bslEl.value = invEl ? invEl.value : todayStr;
+  }
+
+  var firstCb       = chk[0];
+  var poMwskz       = firstCb.getAttribute('data-mwskz') || '';
+  var poZterm       = firstCb.getAttribute('data-zterm')  || '';
+
+  var taxSel = document.getElementById('modal_tax_code');
+  if (taxSel && poMwskz) {
+    var optFound = false;
+    for (var i = 0; i < taxSel.options.length; i++) {
+      if (taxSel.options[i].value === poMwskz) { taxSel.value = poMwskz; optFound = true; break; }
+    }
+    if (!optFound) {
+      var newOpt = document.createElement('option');
+      newOpt.value = poMwskz;
+      newOpt.text  = poMwskz + ' — (dari PO)';
+      newOpt.setAttribute('data-auto', '1');
+      taxSel.add(newOpt);
+      taxSel.value = poMwskz;
+    }
+  }
+
+  var pmntSel = document.getElementById('modal_pmnt_trms');
+  if (pmntSel && !pmntSel.value && poZterm) {
+    var optMatch = false;
+    for (var i = 0; i < pmntSel.options.length; i++) {
+      if (pmntSel.options[i].value === poZterm) { pmntSel.value = poZterm; optMatch = true; break; }
+    }
+    if (!optMatch) {
+      var newOpt2  = document.createElement('option');
+      newOpt2.value = poZterm;
+      newOpt2.text  = poZterm + ' — (dari PO)';
+      newOpt2.setAttribute('data-auto', '1');
+      pmntSel.add(newOpt2);
+      pmntSel.value = poZterm;
+    }
+  }
+  onPaymentTermChange();
+  buildItemsTab(Array.from(chk));
+  switchTab('basic');
+  document.getElementById('parkModal').classList.add('open');
+
+  applyCalcTaxLock();
+  updateBalancePanel();
+}
+
+function closeParkModal() {
+  document.getElementById('parkModal').classList.remove('open');
+  var pmntSel = document.getElementById('modal_pmnt_trms');
+  if (pmntSel) {
+    for (var i = pmntSel.options.length - 1; i >= 0; i--) {
+      if (pmntSel.options[i].getAttribute('data-auto')) pmntSel.remove(i);
+    }
+    pmntSel.value = '';
+  }
+  var taxSel = document.getElementById('modal_tax_code');
+  if (taxSel) {
+    for (var i = taxSel.options.length - 1; i >= 0; i--) {
+      if (taxSel.options[i].getAttribute('data-auto')) taxSel.remove(i);
+    }
+  }
+  var bslEl = document.getElementById('modal_bsl_date');
+  if (bslEl) bslEl.removeAttribute('data-manual');
+  var dueHint   = document.getElementById('ztermDueDateHint');
+  if (dueHint)   { dueHint.textContent   = ''; }
+}
+
+function onInvDateChange() {
+  var invEl = document.getElementById('modal_inv_date');
+  var bslEl = document.getElementById('modal_bsl_date');
+  if (!invEl || !bslEl) return;
+  if (!bslEl.getAttribute('data-manual')) {
+    bslEl.value = invEl.value;
+  }
+  onPaymentTermChange();
+}
+
+function onBslDateChange() {
+  var bslEl = document.getElementById('modal_bsl_date');
+  if (bslEl) bslEl.setAttribute('data-manual', '1');
+  onPaymentTermChange();
+}
+
+var ZTERM_DAYS = {
+  '0001': 0,   '2000': 0,   'Z001': 1,
+  '0002': 30,  'Z007': 7,
+  '0003': 30,  'Z014': 14,
+  '0008': 45,  'Z030': 30,
+  'Z045': 45,  'Z060': 60,
+  'Z090': 90,  'Z120': 120
+};
+
+function calcEndOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0);
+}
+
+function onPaymentTermChange() {
+  var sel    = document.getElementById('modal_pmnt_trms');
+  var bslEl  = document.getElementById('modal_bsl_date');
+  var hint   = document.getElementById('ztermDueDateHint');
+  if (!sel || !hint) return;
+
+  var zterm  = sel.value;
+  var bslStr = bslEl ? bslEl.value : '';
+
+  if (!zterm) { hint.textContent = ''; return; }
+  if (!bslStr) { hint.textContent = 'Isi Baseline Date untuk melihat estimasi jatuh tempo.'; hint.style.color = '#94a3b8'; return; }
+
+  var bslDate = new Date(bslStr + 'T00:00:00');
+  var dueDate = null;
+  var dueNote = '';
+
+  if (ZTERM_DAYS[zterm] !== undefined) {
+    dueDate = new Date(bslDate);
+    dueDate.setDate(dueDate.getDate() + ZTERM_DAYS[zterm]);
+  } else if (zterm === '0004' || zterm === '0006') {
+    dueDate = calcEndOfMonth(bslDate);
+  } else if (zterm === '0005') {
+    dueDate = new Date(bslDate.getFullYear(), bslDate.getMonth() + 1, 10);
+  } else if (zterm === '0007') {
+    var d15 = new Date(bslDate.getFullYear(), bslDate.getMonth() + 1, 15);
+    dueDate  = d15;
+    dueNote  = ' (tgl 15 bln berikutnya — cek Day Limit)';
+  } else if (zterm === '0009') {
+    hint.textContent = 'ℹ️ Payable in 3 installments — jatuh tempo dihitung SAP per cicilan.';
+    hint.style.color = '#64748b';
+    return;
+  }
+
+  if (dueDate) {
+    var dd  = String(dueDate.getDate()).padStart(2,'0');
+    var mm  = String(dueDate.getMonth()+1).padStart(2,'0');
+    var yy  = dueDate.getFullYear();
+    hint.textContent = '📅 Est. Jatuh Tempo: ' + dd + '/' + mm + '/' + yy + dueNote;
+    hint.style.color = '#059669';
+  } else {
+    hint.textContent = '';
+  }
+}
+
+function onCalcTaxToggle() {
+  applyCalcTaxLock();
+  updateBalancePanel();
+  validateParkForm();
+}
+
+function applyCalcTaxLock() {
+  var calcTaxOn = (document.getElementById('modal_calc_tax') || {}).checked;
+  var taxAmtEl  = document.getElementById('modal_tax_amount');
+  var hintEl    = document.getElementById('taxAmountHint');
+  if (!taxAmtEl) return;
+  if (calcTaxOn) {
+    taxAmtEl.readOnly           = true;
+    taxAmtEl.style.background   = '#f1f5f9';
+    taxAmtEl.style.color        = '#94a3b8';
+    taxAmtEl.style.cursor       = 'not-allowed';
+    taxAmtEl.placeholder        = 'Auto-calculated';
+  } else {
+    taxAmtEl.readOnly           = false;
+    taxAmtEl.style.background   = '';
+    taxAmtEl.style.color        = '';
+    taxAmtEl.style.cursor       = '';
+    taxAmtEl.placeholder        = 'Isi Tax Amount manual';
+  }
+}
+
+/* ======================================================================
+   BALANCE PANEL
+   ====================================================================== */
+function updateBalancePanel() {
+  var grossRaw = (document.getElementById('modal_gross_amount').value || '').replace(/[^0-9.,]/g, '').replace(/\./g, '').replace(',', '.');
+  var gross    = parseFloat(grossRaw) || 0;
+  var calcTaxOn= (document.getElementById('modal_calc_tax')   || {}).checked;
+
+  var chk      = document.querySelectorAll('.item-cb:checked');
+  var sumItems = 0;
+  var taxEst   = 0;
+
+  chk.forEach(function(cb) {
+    var lfbnr  = cb.getAttribute('data-lfbnr') || '';
+    var key    = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+    var amt    = (itemsData[key] && itemsData[key].amount !== undefined)
+                 ? itemsData[key].amount
+                 : (parseFloat(cb.getAttribute('data-amount')) || 0);
+
+    var itemTax = (itemsData[key] && itemsData[key].tax_code !== undefined)
+                  ? itemsData[key].tax_code
+                  : ((document.getElementById('modal_tax_code') || {}).value || '');
+
+    var rate = TAX_RATES[itemTax] !== undefined ? TAX_RATES[itemTax] : 0;
+
+    sumItems += amt;
+    if (calcTaxOn && rate > 0) {
+      taxEst += amt * rate;
+    }
+  });
+
+  var taxAmtEl = document.getElementById('modal_tax_amount');
+  var taxUsed  = 0;
+  if (calcTaxOn) {
+    if (taxAmtEl) taxAmtEl.value = taxEst > 0 ? taxEst.toString() : '';
+    taxUsed = taxEst;
+  } else {
+    var taxManualRaw = (taxAmtEl ? taxAmtEl.value : '').replace(/[^0-9.,]/g, '').replace(/\./g, '').replace(',', '.');
+    taxUsed = parseFloat(taxManualRaw) || 0;
+  }
+
+  var expectedGross = sumItems + taxUsed;
+  var balance       = gross - expectedGross;
+
+  // Set global balance untuk validasi
+  window.currentBalance = balance;
+
+  document.getElementById('bp_gross').textContent = gross    > 0 ? fmtIDR(gross)   : '—';
+  document.getElementById('bp_items').textContent = sumItems > 0 ? fmtIDR(sumItems) : (gross > 0 ? 'IDR 0' : '—');
+  document.getElementById('bp_tax').textContent   = taxUsed  > 0 ? fmtIDR(taxUsed)  : (gross > 0 ? 'IDR 0' : '—');
+
+  var row    = document.getElementById('balanceStatusRow');
+  var dot    = document.getElementById('balanceDot');
+  var statusTx = document.getElementById('balanceStatusText');
+  var balVal   = document.getElementById('balanceVal');
+
+  if (gross <= 0) {
+    row.className        = 'balance-status-pill idle';
+    dot.className        = 'balance-dot idle';
+    statusTx.textContent = sumItems > 0 ? 'Expected: ' + fmtIDR(expectedGross) : '—';
+    balVal.textContent   = '';
+  } else if (Math.abs(balance) <= 1) {
+    row.className        = 'balance-status-pill ok';
+    dot.className        = 'balance-dot ok';
+    statusTx.textContent = 'BALANCE';
+    balVal.textContent   = '';
+  } else {
+    row.className        = 'balance-status-pill err';
+    dot.className        = 'balance-dot err';
+    statusTx.textContent = balance > 0 ? '▲ ' + fmtIDR(Math.abs(balance)) : '▼ ' + fmtIDR(Math.abs(balance));
+    balVal.textContent   = '';
+  }
+
+  validateParkForm();
+}
+
+/* ======================================================================
+   FORM VALIDATION (ENFORCING ZERO BALANCE)
+   ====================================================================== */
+function validateParkForm() {
+  var btn = document.getElementById('btnParkInvoice');
+  if (!btn) return;
+  var invDate   = (document.getElementById('modal_inv_date')      || {}).value || '';
+  var pstngDate = (document.getElementById('modal_pstng_date')    || {}).value || '';
+  var refDoc    = ((document.getElementById('modal_ref_doc')      || {}).value || '').trim();
+  var grossRaw  = ((document.getElementById('modal_gross_amount') || {}).value || '').replace(/[^0-9.,]/g, '').replace(/\./g, '').replace(',', '.');
+  var grossNum  = parseFloat(grossRaw) || 0;
+
+  var checks = {
+    inv_date:     !!invDate,
+    pstng_date:   !!pstngDate,
+    ref_doc:      refDoc.length > 0,
+    gross_amount: grossNum > 0,
+    balance_zero: Math.abs(window.currentBalance || 0) <= 1 // Toleransi pembulatan 1 Rupiah
+  };
+
+  function markField(id, ok) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('field-error', !ok && el.value !== '');
+    el.classList.toggle('field-ok',    ok);
+  }
+  markField('modal_inv_date',     checks.inv_date);
+  markField('modal_pstng_date',   checks.pstng_date);
+  markField('modal_ref_doc',      checks.ref_doc);
+  markField('modal_gross_amount', checks.gross_amount);
+
+  var allOk   = checks.inv_date && checks.pstng_date && checks.ref_doc && checks.gross_amount && checks.balance_zero;
+  btn.disabled = !allOk;
+
+  if (!checks.inv_date)        btn.title = 'Invoice Date wajib diisi';
+  else if (!checks.pstng_date) btn.title = 'Posting Date wajib diisi';
+  else if (!checks.ref_doc)    btn.title = 'Reference Document No. wajib diisi';
+  else if (!checks.gross_amount) btn.title = 'Amount wajib diisi';
+  else if (!checks.balance_zero) btn.title = 'Balance belum NOL. Sesuaikan Gross Amount atau Value per Item/GL.';
+  else                         btn.title = '';
+}
+
+/* ======================================================================
+   SUBMIT
+   ====================================================================== */
+function submitParkInvoice() {
+  var invDate     = document.getElementById('modal_inv_date').value;
+  var pstngDate   = document.getElementById('modal_pstng_date').value;
+  var refDoc      = document.getElementById('modal_ref_doc').value.trim();
+  var noFakturPajak = (document.getElementById('modal_no_faktur_pajak') || {value:''}).value.trim();
+  var grossAmtRaw = document.getElementById('modal_gross_amount').value.trim();
+  var taxCode     = document.getElementById('modal_tax_code').value;
+  var calcTax     = document.getElementById('modal_calc_tax').checked ? 'X' : '';
+  var pmtBlock    = document.getElementById('modal_pmt_block').value;
+  var headerTxt   = document.getElementById('modal_header_txt').value.trim();
+  var bslDateEl   = document.getElementById('modal_bsl_date');
+  var bslDate     = bslDateEl ? bslDateEl.value : '';
+  var pmntTrmsEl  = document.getElementById('modal_pmnt_trms');
+  var pmntTrms    = pmntTrmsEl ? pmntTrmsEl.value.trim().toUpperCase() : '';
+  var taxAmtElS   = document.getElementById('modal_tax_amount');
+  var taxAmtRaw   = (taxAmtElS ? taxAmtElS.value : '').replace(/[^0-9.,]/g, '').replace(/\./g, '').replace(',', '.');
+  var taxAmtNum   = parseFloat(taxAmtRaw) || 0;
+  var taxAmtSend  = taxAmtNum.toString();
+
+  if (!invDate)     { alert('Tanggal Invoice wajib diisi.'); switchTab('basic'); return; }
+  if (!pstngDate)   { alert('Posting Date wajib diisi.'); switchTab('basic'); return; }
+  if (!refDoc)      { alert('Nomor Referensi / Faktur wajib diisi.'); switchTab('basic'); return; }
+  if (!grossAmtRaw) { alert('Amount wajib diisi.'); switchTab('basic'); return; }
+  if (Math.abs(window.currentBalance || 0) > 1) { alert('Invoice tidak dapat diproses (Balance tidak NOL). Silahkan pastikan Gross terisi dengan benar.'); return; }
+
+  var grossClean = grossAmtRaw.replace(/[^0-9.,]/g, '');
+  if (/\.(\d{3})$/.test(grossClean)) {
+    grossClean = grossClean.replace(/\./g, '');
+  } else {
+    grossClean = grossClean.replace(/\./g, '').replace(',', '.');
+  }
+  var grossNum = parseFloat(grossClean) || 0;
+  if (grossNum <= 0) { alert('Amount tidak valid.'); return; }
+
+  var invDateAbap   = invDate.replace(/-/g, '');
+  var pstngDateAbap = pstngDate.replace(/-/g, '');
+  var bslDateAbap   = bslDate ? bslDate.replace(/-/g, '') : '';
+
+  var chk = document.querySelectorAll('.item-cb:checked');
+  if (chk.length === 0 && getGLRows().length === 0) {
+    alert('Tidak ada item GR maupun G/L Account yang dipilih/diisi.'); return;
+  }
+
+  var items = [];
+  chk.forEach(function(cb, i) {
+    var lfbnr  = cb.getAttribute('data-lfbnr')  || '';
+    var isSes  = cb.getAttribute('data-is-ses') || '';
+    var key    = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+    var itemData = itemsData[key] || {};
+    var itemQty    = itemData.qty      !== undefined ? itemData.qty      : (parseFloat(cb.getAttribute('data-qty'))    || 0);
+    var itemAmt    = itemData.amount   !== undefined ? itemData.amount   : (parseFloat(cb.getAttribute('data-amount')) || 0);
+    var itemTax    = itemData.tax_code !== undefined ? itemData.tax_code : (cb.getAttribute('data-mwskz') || taxCode);
+
+    items.push({
+      invoice_doc_item: String(i + 1).padStart(6, '0'),
+      po_number:        cb.getAttribute('data-ebeln')   || '',
+      po_item:          cb.getAttribute('data-ebelp')   || '',
+      bukrs:            cb.getAttribute('data-bukrs')   || '',
+      quantity:         String(itemQty),
+      po_unit:          cb.getAttribute('data-unit')    || '',
+      item_amount:      String(itemAmt),
+      ref_doc:          cb.getAttribute('data-mblnr')   || '',
+      ref_doc_year:     cb.getAttribute('data-mjahr')   || '',
+      ref_doc_it:       cb.getAttribute('data-buzei')   || '',
+      tax_code:         itemTax,
+      lfbnr:            lfbnr,
+      is_ses:           isSes
+    });
+  });
+
+  var glRows = getGLRows();
+
+  var form = document.createElement('form');
+  form.method = 'POST';
+  form.action = 'invoice_form.htm';
+
+  function addField(name, value) {
+    var inp  = document.createElement('input');
+    inp.type = 'hidden'; inp.name = name; inp.value = value;
+    form.appendChild(inp);
+  }
+
+  addField('action',            'save');
+  addField('inv_date',          invDateAbap);
+  addField('pstng_date',        pstngDateAbap);
+  addField('ref_doc_no',        refDoc);
+  addField('no_faktur_pajak',   noFakturPajak);
+  addField('gross_amount',      grossClean);
+  addField('tax_amount',        taxAmtSend);
+  addField('tax_code',          taxCode);
+  addField('calc_tax_ind',      calcTax);
+  addField('pmt_block',         pmtBlock);
+  addField('header_txt',        headerTxt);
+  addField('bsl_date',          bslDateAbap);
+  addField('pmnt_trms',         pmntTrms);
+  addField('waers',             getCurrency());
+  addField('items_json',        JSON.stringify(items));
+  addField('gl_accounts_json',  JSON.stringify(glRows));
+  addField('withtax_json',      JSON.stringify(getWTaxRows()));
+
+  var csrfToken = getCsrfToken();
+  if (csrfToken) addField('~csrf_token', csrfToken);
+
+  document.body.appendChild(form);
+  form.submit();
+}
+
+/* ======================================================================
+   FILTER & PAGINATION
+   ====================================================================== */
+var PER_PAGE    = 5;
+var currentPage = 1;
+
+function changePerPage(val) {
+  PER_PAGE = parseInt(val, 10);
+  currentPage = 1;
+  applyPagination();
+}
+
+function getFilterValues() {
+  var q = (document.getElementById('filterUnified') ? document.getElementById('filterUnified').value : '').toLowerCase().trim();
+  return { q: q };
+}
+function isFiltering() { return getFilterValues().q.length > 0; }
+function itemMatches(row, f) {
+  if (!f.q) return true;
+  var ebeln     = (row.getAttribute('data-ebeln')      || '').toLowerCase();
+  var ebelp     = (row.getAttribute('data-ebelp')      || '').toLowerCase();
+  var bedat     = (row.getAttribute('data-bedat')      || '').toLowerCase();
+  var txz01     = (row.getAttribute('data-txz01')      || '').toLowerCase();
+  var mblnr     = (row.getAttribute('data-mblnr')      || '').toLowerCase();
+  var lfbnr     = (row.getAttribute('data-lfbnr')      || '').toLowerCase();
+  var sesXblnr  = (row.getAttribute('data-ses-xblnr')  || '').toLowerCase();
+  var mblnrStripped    = mblnr.replace(/^0+/, '');
+  var lfbnrStripped    = lfbnr.replace(/^0+/, '');
+  var sesXblnrStripped = sesXblnr.replace(/^0+/, '');
+  return (ebeln.indexOf(f.q) >= 0    || ebelp.indexOf(f.q) >= 0 ||
+          bedat.indexOf(f.q) >= 0    || txz01.indexOf(f.q) >= 0 ||
+          mblnr.indexOf(f.q) >= 0    || mblnrStripped.indexOf(f.q) >= 0 ||
+          lfbnr.indexOf(f.q) >= 0    || lfbnrStripped.indexOf(f.q) >= 0 ||
+          sesXblnr.indexOf(f.q) >= 0 || sesXblnrStripped.indexOf(f.q) >= 0);
+}
+function vendorMatches(vendor, f) {
+  if (!f.q) return true;
+  var name  = (vendor.getAttribute('data-vendor-name')  || '').toLowerCase();
+  var lifnr = (vendor.getAttribute('data-vendor-lifnr') || '').toLowerCase();
+  return (name.indexOf(f.q) >= 0 || lifnr.indexOf(f.q) >= 0);
+}
+function filterData() {
+  var f          = getFilterValues();
+  var filtering  = isFiltering();
+  var clearBtn   = document.getElementById('filterClearBtn');
+  if (clearBtn) {
+    if (filtering) clearBtn.classList.add('visible');
+    else           clearBtn.classList.remove('visible');
+  }
+  var vendors       = document.querySelectorAll('.accordion-vendor');
+  var visibleItems  = 0;
+  vendors.forEach(function(vendor) {
+    var vMatch      = vendorMatches(vendor, f);
+    var poGroups    = vendor.querySelectorAll('.po-group');
+    var vendorHasMatch = false;
+    poGroups.forEach(function(poGroup) {
+      var groupRows    = poGroup.querySelectorAll('.po-item-row');
+      var groupHasMatch = false;
+      groupRows.forEach(function(row) {
+        var show = vMatch || itemMatches(row, f);
+        if (show) { row.style.display = ''; groupHasMatch = true; visibleItems++; }
+        else      { row.style.display = 'none'; }
+      });
+      poGroup.style.display = groupHasMatch ? '' : 'none';
+      if (groupHasMatch) vendorHasMatch = true;
+    });
+    if (vendorHasMatch) vendor.classList.remove('filter-hidden');
+    else                vendor.classList.add('filter-hidden');
+    if (filtering && vendorHasMatch) vendor.classList.add('open');
+    if (!filtering)                  vendor.classList.remove('open');
+  });
+  var si = document.getElementById('summaryVisible');
+  if (si) si.textContent = visibleItems;
+  currentPage = 1;
+  applyPagination();
+}
+function clearFilters() {
+  var el = document.getElementById('filterUnified');
+  if (el) el.value = '';
+  var clearBtn = document.getElementById('filterClearBtn');
+  if (clearBtn) clearBtn.classList.remove('visible');
+  filterData();
+}
+
+function applyPagination() {
+  var vendors        = document.querySelectorAll('.accordion-vendor');
+  var visibleVendors = [];
+  vendors.forEach(function(v) {
+    if (!v.classList.contains('filter-hidden')) visibleVendors.push(v);
+  });
+  var totalPages = Math.ceil(visibleVendors.length / PER_PAGE) || 1;
+  if (currentPage > totalPages) currentPage = totalPages;
+  var startIdx = (currentPage - 1) * PER_PAGE;
+  var endIdx   = startIdx + PER_PAGE;
+  visibleVendors.forEach(function(v, i) {
+    v.style.display = (i >= startIdx && i < endIdx) ? '' : 'none';
+  });
+  vendors.forEach(function(v) {
+    if (v.classList.contains('filter-hidden')) v.style.display = 'none';
+  });
+  renderPagination(totalPages, visibleVendors.length);
+}
+function renderPagination(totalPages) {
+  var bar = document.getElementById('paginationBar');
+  if (!bar) return;
+  if (totalPages <= 1) { bar.innerHTML = ''; return; }
+  var html = '';
+  html += currentPage > 1
+    ? '<a href="javascript:void(0)" class="page-btn" onclick="goPage(' + (currentPage-1) + ')">&#9664; Sebelumnya</a>'
+    : '<span class="page-btn disabled">&#9664; Sebelumnya</span>';
+  var startP = Math.max(1, currentPage - 2);
+  var endP   = Math.min(totalPages, startP + 4);
+  if (endP - startP < 4) startP = Math.max(1, endP - 4);
+  for (var i = startP; i <= endP; i++) {
+    html += i === currentPage
+      ? '<span class="page-btn active">' + i + '</span>'
+      : '<a href="javascript:void(0)" class="page-btn" onclick="goPage(' + i + ')">' + i + '</a>';
+  }
+  html += currentPage < totalPages
+    ? '<a href="javascript:void(0)" class="page-btn" onclick="goPage(' + (currentPage+1) + ')">Berikutnya &#9654;</a>'
+    : '<span class="page-btn disabled">Berikutnya &#9654;</span>';
+  bar.innerHTML = html;
+}
+function goPage(p) {
+  currentPage = p;
+  applyPagination();
+  var pb = document.getElementById('paginationBar');
+  if (pb) window.scrollTo({ top: pb.offsetTop - 120, behavior: 'smooth' });
+}
+
+/* ======================================================================
+   G/L ACCOUNT MASTER DATA + AUTOCOMPLETE
+   ====================================================================== */
+var GL_MASTER = [
+<%
+  DATA: lv_saknr TYPE string,
+        lv_txt   TYPE string,
+        lv_sep   TYPE string.
+
+  lv_sep = ''.
+  LOOP AT lt_skat ASSIGNING FIELD-SYMBOL(<ls_skat>).
+    " Bersihkan leading zero pada nomor G/L (misal: 0000100000 -> 100000)
+    lv_saknr = <ls_skat>-saknr.
+    SHIFT lv_saknr LEFT DELETING LEADING '0'.
+
+    " Bersihkan karakter kutip/backslash agar tidak merusak syntax JavaScript
+    lv_txt = <ls_skat>-txt50.
+    REPLACE ALL OCCURRENCES OF `\` IN lv_txt WITH `\\`.
+    REPLACE ALL OCCURRENCES OF `'` IN lv_txt WITH `\'`.
+%>
+  <%= lv_sep %>['<%= lv_saknr %>', '<%= lv_txt %>']
+<%
+    lv_sep = ','.
+  ENDLOOP.
+%>
+];
+
+function searchGL(q) {
+  if (!q || q.length < 2) return [];
+  var ql = q.toLowerCase();
+  var results = [];
+  for (var i = 0; i < GL_MASTER.length; i++) {
+    var code = GL_MASTER[i][0];
+    var name = GL_MASTER[i][1];
+    if (code.toLowerCase().indexOf(ql) === 0 || name.toLowerCase().indexOf(ql) >= 0) {
+      results.push([code, name]);
+      if (results.length >= 10) break;
+    }
+  }
+  return results;
+}
+
+function showGLDropdown(idx, results) {
+  closeAllGLDropdowns();
+  if (results.length === 0) return;
+  var inp = document.getElementById('gl_acct_' + idx);
+  if (!inp) return;
+
+  var dd = document.createElement('div');
+  dd.id  = 'gl_dd_' + idx;
+  dd.style.cssText = 'position:absolute;z-index:9999;background:#fff;border:1px solid #cbd5e1;' +
+    'border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.12);max-height:280px;overflow-y:auto;min-width:380px;';
+
+  results.forEach(function(item) {
+    var opt = document.createElement('div');
+    opt.style.cssText = 'display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;' +
+      'border-bottom:1px solid #f1f5f9;font-size:13px;transition:background .1s;';
+    opt.onmouseover = function() { this.style.background = '#f0fdf4'; };
+    opt.onmouseout  = function() { this.style.background = ''; };
+    opt.innerHTML =
+      '<span style="font-family:\'SF Mono\',Consolas,monospace;font-size:12px;color:#059669;' +
+        'background:#f0fdf4;padding:2px 7px;border-radius:4px;white-space:nowrap;flex-shrink:0;">' +
+        item[0] + '</span>' +
+      '<span style="color:#334155;">' + item[1] + '</span>';
+    opt.onmousedown = function(e) {
+      e.preventDefault();
+      selectGLAccount(idx, item[0], item[1]);
+    };
+    dd.appendChild(opt);
+  });
+
+  var rect = inp.getBoundingClientRect();
+  var modalBody = inp.closest('.modal-body');
+  var scrollTop = modalBody ? modalBody.scrollTop : 0;
+  dd.style.top  = (inp.offsetTop + inp.offsetHeight + 2) + 'px';
+  dd.style.left = inp.offsetLeft + 'px';
+
+  var wrapper = inp.parentElement;
+  wrapper.style.position = 'relative';
+  wrapper.appendChild(dd);
+}
+
+function closeAllGLDropdowns() {
+  document.querySelectorAll('[id^="gl_dd_"]').forEach(function(d) { d.remove(); });
+}
+
+function selectGLAccount(idx, code, name) {
+  var inp      = document.getElementById('gl_acct_' + idx);
+  var labelEl  = document.getElementById('gl_acct_label_' + idx);
+  if (inp)     inp.value = code;
+  if (labelEl) { labelEl.textContent = name; labelEl.style.display = 'block'; }
+  closeAllGLDropdowns();
+  var amtEl = document.getElementById('gl_amt_' + idx);
+  if (amtEl) amtEl.focus();
+}
+
+/* ======================================================================
+   G/L ACCOUNT ROWS (UPDATED: Added Cost Center)
+   ====================================================================== */
+var glRowCount = 0;
+
+function addGLRow() {
+  glRowCount++;
+  var idx  = glRowCount;
+  var cont = document.getElementById('glAccountRows');
+  if (!cont) return;
+
+  var div = document.createElement('div');
+  div.id  = 'gl_row_' + idx;
+  div.style.cssText = 'display:grid;grid-template-columns:1fr 100px 130px 80px 32px;gap:8px;' +
+    'align-items:end;margin-bottom:10px;padding:10px 12px;' +
+    'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;position:relative;';
+
+  var inputStyle = 'width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;' +
+    'font-size:13px;font-family:inherit;';
+  var labelStyle = 'font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;' +
+    'letter-spacing:.07em;display:block;margin-bottom:4px;';
+
+  div.innerHTML =
+    /* Kolom 1: G/L Account search */
+    '<div style="position:relative;">' +
+      '<label style="' + labelStyle + '">G/L Account <span style="color:#ef4444;">*</span></label>' +
+      '<input type="text" id="gl_acct_' + idx + '"' +
+        ' placeholder="Ketik nomor atau nama akun..."' +
+        ' autocomplete="off"' +
+        ' style="' + inputStyle + '"' +
+        ' oninput="var r=searchGL(this.value); showGLDropdown(' + idx + ',r);"' +
+        ' onblur="setTimeout(function(){closeAllGLDropdowns();},150);"' +
+        ' onkeydown="if(event.key===\'Escape\'){closeAllGLDropdowns();}"' +
+      '/>' +
+      '<div id="gl_acct_label_' + idx + '"' +
+        ' style="display:none;margin-top:4px;font-size:11px;color:#059669;' +
+          'font-weight:600;padding:2px 4px;background:#f0fdf4;border-radius:4px;' +
+          'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' +
+      '</div>' +
+    '</div>' +
+    /* Kolom 2: Cost Center */
+    '<div>' +
+      '<label style="' + labelStyle + '">Cost Center</label>' +
+      '<input type="text" id="gl_cc_' + idx + '" placeholder="Cth: 1001"' +
+        ' style="' + inputStyle + 'text-transform:uppercase;"/>' +
+    '</div>' +
+    /* Kolom 3: Amount */
+    '<div>' +
+      '<label style="' + labelStyle + '">Amount <span style="color:#ef4444;">*</span></label>' +
+      '<input type="text" id="gl_amt_' + idx + '" placeholder="0"' +
+        ' style="' + inputStyle + 'text-align:right;"' +
+        ' oninput="updateGLTotal()"/>' +
+    '</div>' +
+    /* Kolom 4: Tax Code */
+    '<div>' +
+      '<label style="' + labelStyle + '">Tax Code</label>' +
+      '<input type="text" id="gl_tax_' + idx + '" maxlength="2" placeholder="V1"' +
+        ' style="' + inputStyle + 'text-transform:uppercase;"' +
+        ' oninput="this.value=this.value.toUpperCase()"/>' +
+    '</div>' +
+    /* Kolom 5: Hapus */
+    '<div style="padding-bottom:1px;">' +
+      '<button type="button" onclick="removeGLRow(' + idx + ')"' +
+        ' style="width:32px;height:32px;border:1px solid #fecaca;border-radius:6px;' +
+          'background:#fff;color:#dc2626;font-size:16px;cursor:pointer;' +
+          'display:flex;align-items:center;justify-content:center;">' +
+        '&times;' +
+      '</button>' +
+    '</div>';
+
+  cont.appendChild(div);
+  setTimeout(function() {
+    var el = document.getElementById('gl_acct_' + idx);
+    if (el) el.focus();
+  }, 50);
+  updateGLTotal();
+}
+
+function removeGLRow(idx) {
+  var row = document.getElementById('gl_row_' + idx);
+  if (row) row.remove();
+  updateGLTotal();
+}
+
+function updateGLTotal() {
+  var rows  = getGLRows();
+  var total = 0;
+  rows.forEach(function(r) { total += r.amount; });
+  var el = document.getElementById('glTotalVal');
+  if (el) el.textContent = 'IDR ' + total.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function getGLRows() {
+  var result = [];
+  var cont   = document.getElementById('glAccountRows');
+  if (!cont) return result;
+  cont.querySelectorAll('[id^="gl_row_"]').forEach(function(row) {
+    var idx    = row.id.replace('gl_row_', '');
+    var acctEl = document.getElementById('gl_acct_' + idx);
+    var ccEl   = document.getElementById('gl_cc_'   + idx);
+    var amtEl  = document.getElementById('gl_amt_'  + idx);
+    var taxEl  = document.getElementById('gl_tax_'  + idx);
+    if (!acctEl) return;
+    var acct   = acctEl.value.trim();
+    if (!acct)  return;
+    var rawAmt = (amtEl ? amtEl.value : '').replace(/[^0-9.,]/g,'').replace(/\./g,'').replace(',','.');
+    var amt    = parseFloat(rawAmt) || 0;
+    result.push({
+      gl_account: acct,
+      cost_center: ccEl ? ccEl.value.trim().toUpperCase() : '',
+      amount:     amt,
+      tax_code:   taxEl ? taxEl.value.trim().toUpperCase() : ''
+    });
+  });
+  return result;
+}
+
+applyPagination();
+applyCalcTaxLock();
+
+/* ======================================================================
+   WITHHOLDING TAX ROWS
+   ====================================================================== */
+var wtaxRowCount = 0;
+
+var WTAX_TYPES = [
+  { type: 'P1', code: 'P1', label: 'PPh Pasal 21 — Pegawai Tetap' },
+  { type: 'P1', code: 'P2', label: 'PPh Pasal 21 — Tenaga Ahli' },
+  { type: 'P2', code: 'P3', label: 'PPh Pasal 22 — Impor' },
+  { type: 'P3', code: 'P4', label: 'PPh Pasal 23 — Jasa (2%)', npwp: 'NPWP' },
+  { type: 'P3', code: 'P4N', label: 'PPh Pasal 23 — Jasa, Non-NPWP (4%)', npwp: 'NON-NPWP' },
+  { type: 'P3', code: 'P5', label: 'PPh Pasal 23 — Bunga/Dividen (15%)', npwp: 'NPWP' },
+  { type: 'P3', code: 'P5N', label: 'PPh Pasal 23 — Bunga/Dividen, Non-NPWP (30%)', npwp: 'NON-NPWP' },
+  { type: 'P4', code: 'P6', label: 'PPh Pasal 4(2) — Sewa (10%)' },
+  { type: 'P4', code: 'P7', label: 'PPh Pasal 4(2) — Konstruksi (3%)' }
+];
+
+function addWTaxRow() {
+  wtaxRowCount++;
+  var idx  = wtaxRowCount;
+  var cont = document.getElementById('wtaxRows');
+  if (!cont) return;
+
+  var div = document.createElement('div');
+  div.id  = 'wtax_row_' + idx;
+  div.style.cssText =
+    'display:grid;grid-template-columns:40px 1fr 130px 130px 130px 36px;gap:6px;' +
+    'align-items:end;margin-bottom:8px;padding:10px 12px;' +
+    'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;';
+
+  var inputStyle = 'width:100%;padding:7px 10px;border:1px solid #e2e8f0;border-radius:6px;' +
+    'font-size:13px;font-family:inherit;background:#fff;';
+  var labelStyle = 'font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;' +
+    'letter-spacing:.07em;display:block;margin-bottom:4px;';
+
+  var opts = '<option value="">-- Pilih --</option>';
+  WTAX_TYPES.forEach(function(wt) {
+    var npwpAttr = wt.npwp ? ' data-npwp="' + wt.npwp + '"' : '';
+    opts += '<option value="' + wt.type + '|' + wt.code + '"' + npwpAttr + '>' +
+            wt.type + '/' + wt.code + ' — ' + wt.label + '</option>';
+  });
+
+  div.innerHTML =
+    '<div style="padding-bottom:8px;font-size:12px;font-weight:600;color:#94a3b8;text-align:center;">' + idx + '</div>' +
+    '<div>' +
+      '<label style="' + labelStyle + '">W/Tax Type / Code</label>' +
+      '<select id="wtax_type_' + idx + '"' +
+        ' style="' + inputStyle + 'cursor:pointer;"' +
+        ' onchange="onWTaxTypeChange(' + idx + ')">' +
+        opts +
+      '</select>' +
+      '<div id="wtax_type_hint_' + idx + '"' +
+        ' style="display:none;font-size:10px;color:#64748b;margin-top:4px;align-items:center;gap:6px;">' +
+        '<span id="wtax_type_lbl_' + idx + '"></span>' +
+        '<span id="wtax_npwp_badge_' + idx + '" style="display:none;padding:2px 5px;border-radius:4px;font-weight:700;font-size:9px;"></span>' +
+      '</div>' +
+    '</div>' +
+    '<div>' +
+      '<label style="' + labelStyle + '">W/Tax Base FC</label>' +
+      '<input type="text" id="wtax_base_' + idx + '" placeholder="0,00"' +
+        ' style="' + inputStyle + 'text-align:right;"' +
+        ' oninput="recalcWTaxRow(' + idx + '); updateWTaxTotal();"/>' +
+    '</div>' +
+    '<div>' +
+      '<label style="' + labelStyle + '">W/Tax Amt in FC</label>' +
+      '<input type="text" id="wtax_amt_' + idx + '" placeholder="0,00"' +
+        ' style="' + inputStyle + 'text-align:right;"' +
+        ' oninput="updateWTaxTotal();"/>' +
+    '</div>' +
+    '<div>' +
+      '<label style="' + labelStyle + '">W/Tax %</label>' +
+      '<input type="text" id="wtax_pct_' + idx + '" placeholder="0,00"' +
+        ' style="' + inputStyle + 'text-align:right;"' +
+        ' oninput="recalcWTaxRow(' + idx + '); updateWTaxTotal();"/>' +
+    '</div>' +
+    '<div style="padding-bottom:1px;">' +
+      '<button type="button" onclick="removeWTaxRow(' + idx + ')"' +
+        ' style="width:32px;height:32px;border:1px solid #fecaca;border-radius:6px;' +
+          'background:#fff;color:#dc2626;font-size:16px;cursor:pointer;' +
+          'display:flex;align-items:center;justify-content:center;">' +
+        '&times;' +
+      '</button>' +
+    '</div>';
+
+  cont.appendChild(div);
+  updateWTaxTotal();
+}
+
+var WTAX_PCT_DEFAULTS = {
+  'P1|P1': 5, 'P1|P2': 7.5, 'P2|P3': 7.5,
+  'P3|P4': 2, 'P3|P4N': 4,
+  'P3|P5': 15, 'P3|P5N': 30,
+  'P4|P6': 10, 'P4|P7': 3
+};
+
+function onWTaxTypeChange(idx) {
+  var sel    = document.getElementById('wtax_type_' + idx);
+  var hint   = document.getElementById('wtax_type_hint_' + idx);
+  var lbl    = document.getElementById('wtax_type_lbl_' + idx);
+  var badge  = document.getElementById('wtax_npwp_badge_' + idx);
+  var baseEl = document.getElementById('wtax_base_' + idx);
+  var pctEl  = document.getElementById('wtax_pct_' + idx);
+
+  if (!sel) return;
+  var val = sel.value;
+  var opt = sel.options[sel.selectedIndex];
+
+  if (val && hint) {
+    hint.style.display = 'flex';
+    lbl.textContent    = opt.text;
+
+    // Tampilkan & styling badge NPWP
+    var npwpAttr = opt.getAttribute('data-npwp');
+    if (npwpAttr) {
+      badge.style.display = 'inline-block';
+      badge.textContent   = npwpAttr;
+      if (npwpAttr === 'NPWP') {
+        badge.style.background = '#dcfce7';
+        badge.style.color      = '#166534';
+        badge.style.border     = '1px solid #bbf7d0';
+      } else {
+        badge.style.background = '#fee2e2';
+        badge.style.color      = '#991b1b';
+        badge.style.border     = '1px solid #fecaca';
+      }
+    } else {
+      badge.style.display = 'none';
+    }
+
+    // Hitung total DPP item untuk Auto-fill
+    var totalDpp = 0;
+    var chk = document.querySelectorAll('.item-cb:checked');
+    chk.forEach(function(cb) {
+      var lfbnr = cb.getAttribute('data-lfbnr') || '';
+      var key = cb.getAttribute('data-ebeln') + '_' + cb.getAttribute('data-ebelp') + (lfbnr ? '_' + lfbnr : '');
+      var amt = (itemsData[key] && itemsData[key].amount !== undefined)
+                 ? itemsData[key].amount
+                 : (parseFloat(cb.getAttribute('data-amount')) || 0);
+      totalDpp += amt;
+    });
+
+    // Auto-fill ke W/Tax Base FC jika ada nilainya
+    if (baseEl && totalDpp > 0) {
+      baseEl.value = totalDpp.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+  } else if (hint) {
+    hint.style.display = 'none';
+    if (baseEl) baseEl.value = '';
+  }
+
+  // Set default percentage & kalkulasi otomatis
+  if (pctEl && WTAX_PCT_DEFAULTS[val] !== undefined) {
+    pctEl.value = WTAX_PCT_DEFAULTS[val].toString().replace('.', ',');
+    recalcWTaxRow(idx);
+  } else {
+    if (pctEl) pctEl.value = '';
+    var amtEl = document.getElementById('wtax_amt_' + idx);
+    if (amtEl) amtEl.value = '';
+  }
+
+  updateWTaxTotal();
+}
+
+function recalcWTaxRow(idx) {
+  var baseEl  = document.getElementById('wtax_base_' + idx);
+  var amtEl   = document.getElementById('wtax_amt_'  + idx);
+  var pctEl   = document.getElementById('wtax_pct_'  + idx);
+  if (!baseEl || !amtEl || !pctEl) return;
+  var baseRaw = baseEl.value.replace(/\./g,'').replace(',','.');
+  var pctRaw  = pctEl.value.replace(',','.');
+  var base    = parseFloat(baseRaw) || 0;
+  var pct     = parseFloat(pctRaw)  || 0;
+  if (base > 0 && pct > 0) {
+    var computed = base * pct / 100;
+    amtEl.value  = computed.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+}
+
+function removeWTaxRow(idx) {
+  var row = document.getElementById('wtax_row_' + idx);
+  if (row) row.remove();
+  updateWTaxTotal();
+}
+
+function updateWTaxTotal() {
+  var rows  = getWTaxRows();
+  var total = 0;
+  rows.forEach(function(r) { total += r.wtax_amount; });
+  var el = document.getElementById('wtaxTotalVal');
+  if (el) el.textContent = 'IDR ' + total.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function getWTaxRows() {
+  var result = [];
+  var cont   = document.getElementById('wtaxRows');
+  if (!cont) return result;
+  cont.querySelectorAll('[id^="wtax_row_"]').forEach(function(row) {
+    var idx     = row.id.replace('wtax_row_', '');
+    var selEl   = document.getElementById('wtax_type_' + idx);
+    var baseEl  = document.getElementById('wtax_base_' + idx);
+    var amtEl   = document.getElementById('wtax_amt_'  + idx);
+    var pctEl   = document.getElementById('wtax_pct_'  + idx);
+    if (!selEl || !selEl.value) return;
+    var parts   = selEl.value.split('|');
+    var baseRaw = (baseEl ? baseEl.value : '').replace(/\./g,'').replace(',','.');
+    var amtRaw  = (amtEl  ? amtEl.value  : '').replace(/\./g,'').replace(',','.');
+    var pctRaw  = (pctEl  ? pctEl.value  : '').replace(',','.');
+    result.push({
+      wtax_type:   parts[0] || '',
+      wtax_code:   parts[1] || '',
+      wtax_base:   parseFloat(baseRaw) || 0,
+      wtax_amount: parseFloat(amtRaw)  || 0,
+      wtax_pct:    parseFloat(pctRaw)  || 0
+    });
+  });
+  return result;
+}
+
+document.getElementById('parkModal').addEventListener('click', function(e) {
+  if (e.target === this) closeParkModal();
+});
+</script>
+
+</body></html>

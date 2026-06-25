@@ -1,0 +1,964 @@
+Upload Kode ABAP
+
+
+<%@page language="abap"%>
+<%
+* ======================================================================
+* 1. DATA DECLARATIONS & ROLE MANAGEMENT
+* ======================================================================
+  DATA: lv_on_action   TYPE string,
+        lv_action      TYPE string,
+        lv_belnr       TYPE c LENGTH 10,
+        lv_gjahr       TYPE n LENGTH 4,
+        lv_reason      TYPE string,
+        lv_role        TYPE string,
+        gv_active_page TYPE string,
+        gv_message     TYPE string.
+
+  DATA: ls_rbkpv TYPE mrm_rbkpv,
+        lt_drseg TYPE mmcr_tdrseg,
+        ls_log   TYPE zapp_log.
+
+  lv_role        = request->get_form_field( 'role' ).
+  gv_active_page = 'PARKED'.
+
+  " Main Table & Supporting (MIRO / RBKP)
+  DATA: it_parked_inv TYPE TABLE OF rbkp, wa_inv TYPE rbkp,
+        it_rseg       TYPE TABLE OF rseg, wa_rseg TYPE rseg,
+        it_rbco       TYPE TABLE OF rbco, wa_rbco TYPE rbco,
+        it_lfa1       TYPE TABLE OF lfa1, wa_lfa1 TYPE lfa1,
+        it_lfbk       TYPE TABLE OF lfbk, wa_lfbk TYPE lfbk,
+        it_bnka       TYPE TABLE OF bnka, wa_bnka TYPE bnka,
+        it_t052       TYPE TABLE OF t052, wa_t052 TYPE t052,
+        it_attach     TYPE TABLE OF zapp_attachment, wa_attach TYPE zapp_attachment.
+
+* ======================================================================
+* 2. ACTION HANDLER (APPROVE / REJECT / MASS APPROVE)
+* ======================================================================
+  lv_on_action = request->get_form_field( 'hiddenAction' ).
+  lv_reason    = request->get_form_field( 'hiddenReason' ).
+
+  DATA: lv_selected_items TYPE string.
+  lv_selected_items = request->get_form_field( 'hiddenSelectedItems' ).
+
+  IF lv_on_action IS NOT INITIAL.
+    IF lv_role <> 'MGR'.
+      gv_message = 'Action Denied: Only Managers have the authority to process documents.'.
+    ELSE.
+      " ------------------------------------------------------------------
+      " MASS APPROVAL LOGIC
+      " ------------------------------------------------------------------
+      IF lv_on_action = 'MASSAPP'.
+        DATA: lt_items TYPE TABLE OF string,
+              lv_item  TYPE string,
+              lv_success_cnt TYPE i,
+              lv_fail_cnt    TYPE i.
+
+        DATA: lt_mchk_rseg TYPE TABLE OF rseg,
+              lt_mchk_rbco TYPE TABLE OF rbco,
+              lv_mchk_tot  TYPE rbkp-rmwwr,
+              lv_mchk_calc TYPE rbkp-rmwwr,
+              lv_mchk_diff TYPE rbkp-rmwwr,
+              lv_m_max_rec TYPE i.
+
+        CLEAR: lv_success_cnt, lv_fail_cnt.
+        SPLIT lv_selected_items AT ',' INTO TABLE lt_items.
+
+        LOOP AT lt_items INTO lv_item.
+          SPLIT lv_item AT '_' INTO lv_belnr lv_gjahr.
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_belnr IMPORTING output = lv_belnr.
+
+          CLEAR lv_m_max_rec.
+          SELECT SINGLE MAX( record ) FROM zapp_log INTO lv_m_max_rec WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+
+          CLEAR ls_log.
+          ls_log-mandt  = sy-mandt.
+          ls_log-belnr  = lv_belnr.
+          ls_log-gjahr  = lv_gjahr.
+          ls_log-datum  = sy-datum.
+          ls_log-uzeit  = sy-uzeit.
+          ls_log-uname  = sy-uname.
+          ls_log-record = lv_m_max_rec + 1.
+
+          CALL FUNCTION 'MRM_INVOICE_READ'
+            EXPORTING i_belnr = lv_belnr i_gjahr = lv_gjahr IMPORTING e_rbkpv = ls_rbkpv TABLES t_drseg = lt_drseg EXCEPTIONS error_message = 1 OTHERS = 2.
+
+          IF sy-subrc = 0.
+            REFRESH: lt_mchk_rseg, lt_mchk_rbco.
+            SELECT * FROM rseg INTO TABLE lt_mchk_rseg WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+            SELECT * FROM rbco INTO TABLE lt_mchk_rbco WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+
+            CLEAR lv_mchk_tot.
+            LOOP AT lt_mchk_rseg INTO DATA(wa_mchk_rseg).
+              IF ls_rbkpv-xrech = 'X' AND wa_mchk_rseg-shkzg = 'H'. CONTINUE. ENDIF.
+              IF ls_rbkpv-xrech = ' ' AND wa_mchk_rseg-shkzg = 'S'. CONTINUE. ENDIF.
+              lv_mchk_tot = lv_mchk_tot + wa_mchk_rseg-wrbtr.
+            ENDLOOP.
+
+            LOOP AT lt_mchk_rbco INTO DATA(wa_mchk_rbco).
+              READ TABLE lt_mchk_rseg TRANSPORTING NO FIELDS WITH KEY belnr = wa_mchk_rbco-belnr gjahr = wa_mchk_rbco-gjahr buzei = wa_mchk_rbco-buzei.
+              IF sy-subrc <> 0.
+                IF ls_rbkpv-xrech = 'X' AND wa_mchk_rbco-shkzg = 'H'. CONTINUE. ENDIF.
+                IF ls_rbkpv-xrech = ' ' AND wa_mchk_rbco-shkzg = 'S'. CONTINUE. ENDIF.
+                lv_mchk_tot = lv_mchk_tot + wa_mchk_rbco-wrbtr.
+              ENDIF.
+            ENDLOOP.
+
+            lv_mchk_calc = lv_mchk_tot + ls_rbkpv-wmwst1 + ls_rbkpv-beznk.
+            lv_mchk_diff = ls_rbkpv-rmwwr - lv_mchk_calc.
+
+            IF lv_mchk_diff <> 0.
+               ls_log-action     = 'FAILED'.
+               ls_log-bal_status = 'NOT BALANCED'.
+               ls_log-reason     = 'Approval blocked: Invoice is not balanced. Backend validation failed.'.
+               ls_log-flag       = 3.
+               INSERT zapp_log FROM ls_log.
+               COMMIT WORK AND WAIT.
+               lv_fail_cnt = lv_fail_cnt + 1.
+            ELSE.
+               CALL FUNCTION 'MRM_PARKED_INVOICE_POST' EXPORTING i_rbkpv = ls_rbkpv ti_drseg = lt_drseg EXCEPTIONS error_message = 1 OTHERS = 2.
+               IF sy-subrc = 0.
+                  CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = 'X'.
+                  ls_log-action     = 'APPROVED'.
+                  ls_log-bal_status = 'POSTED'.
+                  ls_log-reason     = 'Approved and Posted via Mass Dashboard'.
+                  ls_log-flag       = 1.
+                  INSERT zapp_log FROM ls_log.
+                  COMMIT WORK AND WAIT.
+                  lv_success_cnt = lv_success_cnt + 1.
+               ELSE.
+                  MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO gv_message.
+                  ls_log-action     = 'FAILED'.
+                  ls_log-bal_status = 'ERROR'.
+                  ls_log-reason     = gv_message.
+                  ls_log-flag       = 3.
+                  INSERT zapp_log FROM ls_log.
+                  COMMIT WORK AND WAIT.
+                  lv_fail_cnt = lv_fail_cnt + 1.
+               ENDIF.
+            ENDIF.
+          ELSE.
+            lv_fail_cnt = lv_fail_cnt + 1.
+          ENDIF.
+        ENDLOOP.
+        gv_message = |Mass Approval Completed: { lv_success_cnt } Successfully Posted, { lv_fail_cnt } Failed.|.
+
+      " ------------------------------------------------------------------
+      " SINGLE ACTION LOGIC (APPROVE / REJECT)
+      " ------------------------------------------------------------------
+      ELSE.
+        SPLIT lv_on_action AT '_' INTO lv_action lv_belnr lv_gjahr.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_belnr IMPORTING output = lv_belnr.
+
+        DATA: lv_max_rec TYPE i.
+        CLEAR lv_max_rec.
+
+        SELECT SINGLE MAX( record ) FROM zapp_log INTO lv_max_rec
+          WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+
+        CLEAR ls_log.
+        ls_log-mandt  = sy-mandt.
+        ls_log-belnr  = lv_belnr.
+        ls_log-gjahr  = lv_gjahr.
+        ls_log-datum  = sy-datum.
+        ls_log-uzeit  = sy-uzeit.
+        ls_log-uname  = sy-uname.
+        ls_log-record = lv_max_rec + 1.
+
+        CASE lv_action.
+          WHEN 'REJ'.
+            ls_log-action     = 'REJECTED'.
+            ls_log-bal_status = 'REJECTED'.
+            ls_log-reason     = lv_reason.
+            ls_log-flag       = 0.
+            INSERT zapp_log FROM ls_log.
+
+            IF sy-subrc = 0.
+              COMMIT WORK AND WAIT.
+              gv_message = |Document { lv_belnr } has been successfully rejected and hidden from your queue.|.
+            ELSE.
+              gv_message = |Failed to update reject status for Document { lv_belnr }.|.
+            ENDIF.
+
+          WHEN 'APP'.
+            CALL FUNCTION 'MRM_INVOICE_READ'
+              EXPORTING i_belnr = lv_belnr i_gjahr = lv_gjahr IMPORTING e_rbkpv = ls_rbkpv TABLES t_drseg = lt_drseg EXCEPTIONS error_message = 1 OTHERS = 2.
+
+            IF sy-subrc = 0.
+              DATA: lt_chk_rseg TYPE TABLE OF rseg,
+                    lt_chk_rbco TYPE TABLE OF rbco,
+                    lv_chk_tot  TYPE rbkp-rmwwr,
+                    lv_chk_calc TYPE rbkp-rmwwr,
+                    lv_chk_diff TYPE rbkp-rmwwr.
+
+              SELECT * FROM rseg INTO TABLE lt_chk_rseg WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+              SELECT * FROM rbco INTO TABLE lt_chk_rbco WHERE belnr = lv_belnr AND gjahr = lv_gjahr.
+
+              CLEAR lv_chk_tot.
+              LOOP AT lt_chk_rseg INTO DATA(wa_chk_rseg).
+                IF ls_rbkpv-xrech = 'X' AND wa_chk_rseg-shkzg = 'H'. CONTINUE. ENDIF.
+                IF ls_rbkpv-xrech = ' ' AND wa_chk_rseg-shkzg = 'S'. CONTINUE. ENDIF.
+                lv_chk_tot = lv_chk_tot + wa_chk_rseg-wrbtr.
+              ENDLOOP.
+
+              LOOP AT lt_chk_rbco INTO DATA(wa_chk_rbco).
+                READ TABLE lt_chk_rseg TRANSPORTING NO FIELDS WITH KEY belnr = wa_chk_rbco-belnr gjahr = wa_chk_rbco-gjahr buzei = wa_chk_rbco-buzei.
+                IF sy-subrc <> 0.
+                  IF ls_rbkpv-xrech = 'X' AND wa_chk_rbco-shkzg = 'H'. CONTINUE. ENDIF.
+                  IF ls_rbkpv-xrech = ' ' AND wa_chk_rbco-shkzg = 'S'. CONTINUE. ENDIF.
+                  lv_chk_tot = lv_chk_tot + wa_chk_rbco-wrbtr.
+                ENDIF.
+              ENDLOOP.
+
+              lv_chk_calc = lv_chk_tot + ls_rbkpv-wmwst1 + ls_rbkpv-beznk.
+              lv_chk_diff = ls_rbkpv-rmwwr - lv_chk_calc.
+
+              IF lv_chk_diff <> 0.
+                 ls_log-action     = 'FAILED'.
+                 ls_log-bal_status = 'NOT BALANCED'.
+                 ls_log-reason     = 'Approval blocked: Invoice is not balanced. Backend validation failed.'.
+                 ls_log-flag       = 3.
+                 INSERT zapp_log FROM ls_log.
+                 COMMIT WORK AND WAIT.
+                 gv_message = |Approval blocked: Invoice { lv_belnr } is not balanced.|.
+              ELSE.
+                 CALL FUNCTION 'MRM_PARKED_INVOICE_POST'
+                   EXPORTING i_rbkpv = ls_rbkpv ti_drseg = lt_drseg EXCEPTIONS error_message = 1 OTHERS = 2.
+
+                 IF sy-subrc = 0.
+                    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = 'X'.
+                    ls_log-action     = 'APPROVED'.
+                    ls_log-bal_status = 'POSTED'.
+                    ls_log-reason     = 'Approved and Posted via Dashboard'.
+                    ls_log-flag       = 1.
+                    INSERT zapp_log FROM ls_log.
+                    COMMIT WORK AND WAIT.
+                    gv_message = |Invoice { lv_belnr } has been successfully approved and posted!|.
+                 ELSE.
+                    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO gv_message.
+                    ls_log-action     = 'FAILED'.
+                    ls_log-bal_status = 'ERROR'.
+                    ls_log-reason     = gv_message.
+                    ls_log-flag       = 3.
+                    INSERT zapp_log FROM ls_log.
+                    COMMIT WORK AND WAIT.
+                    gv_message = |Failed to Approve { lv_belnr }: { gv_message }|.
+                 ENDIF.
+              ENDIF.
+            ELSE.
+              MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO gv_message.
+              gv_message = |Failed to Read Invoice { lv_belnr }: { gv_message }|.
+            ENDIF.
+        ENDCASE.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+* ======================================================================
+* 3. DATA FETCH & FILTER
+* ======================================================================
+  SELECT * FROM rbkp INTO TABLE it_parked_inv
+    WHERE rbstat IN ('A', 'B') AND blart = 'RE'
+    ORDER BY cpudt DESCENDING.
+
+  IF it_parked_inv IS NOT INITIAL.
+    DATA: lv_tabix       TYPE sytabix,
+          lv_latest_flag TYPE zapp_log-flag.
+
+    " Hanya tampil jika belum di-log ATAU flag terakhir = 3 (failed/resubmit)
+    LOOP AT it_parked_inv INTO wa_inv.
+      lv_tabix = sy-tabix.
+      CLEAR lv_latest_flag.
+
+      SELECT flag FROM zapp_log INTO @lv_latest_flag
+        UP TO 1 ROWS
+        WHERE belnr = @wa_inv-belnr AND gjahr = @wa_inv-gjahr
+        ORDER BY record DESCENDING.
+      ENDSELECT.
+
+      IF sy-subrc = 0 AND ( lv_latest_flag = 0 OR lv_latest_flag = 1 ).
+        DELETE it_parked_inv INDEX lv_tabix.
+      ENDIF.
+    ENDLOOP.
+
+    IF it_parked_inv IS NOT INITIAL.
+      SELECT * FROM rseg INTO TABLE it_rseg FOR ALL ENTRIES IN it_parked_inv WHERE belnr = it_parked_inv-belnr AND gjahr = it_parked_inv-gjahr.
+      SELECT * FROM rbco INTO TABLE it_rbco FOR ALL ENTRIES IN it_parked_inv WHERE belnr = it_parked_inv-belnr AND gjahr = it_parked_inv-gjahr.
+      SELECT * FROM lfa1 INTO TABLE it_lfa1 FOR ALL ENTRIES IN it_parked_inv WHERE lifnr = it_parked_inv-lifnr.
+      SELECT * FROM lfbk INTO TABLE it_lfbk FOR ALL ENTRIES IN it_parked_inv WHERE lifnr = it_parked_inv-lifnr.
+      IF it_lfbk IS NOT INITIAL.
+        SELECT * FROM bnka INTO TABLE it_bnka FOR ALL ENTRIES IN it_lfbk WHERE banks = it_lfbk-banks AND bankl = it_lfbk-bankl.
+      ENDIF.
+      SELECT * FROM t052 INTO TABLE it_t052 FOR ALL ENTRIES IN it_parked_inv WHERE zterm = it_parked_inv-zterm.
+
+      " --- FETCH ATTACHMENTS (Diambil dari No. PO atau No. Invoice) ---
+      DATA: lt_ref_keys TYPE TABLE OF zapp_attachment-ref_doc,
+            lv_ref_key  TYPE zapp_attachment-ref_doc.
+
+      LOOP AT it_parked_inv INTO wa_inv.
+        lv_ref_key = wa_inv-belnr.
+        APPEND lv_ref_key TO lt_ref_keys.
+      ENDLOOP.
+      LOOP AT it_rseg INTO wa_rseg.
+        lv_ref_key = wa_rseg-ebeln.
+        APPEND lv_ref_key TO lt_ref_keys.
+      ENDLOOP.
+      SORT lt_ref_keys.
+      DELETE ADJACENT DUPLICATES FROM lt_ref_keys.
+
+     IF lt_ref_keys IS NOT INITIAL.
+        SELECT * FROM zapp_attachment INTO TABLE it_attach
+          FOR ALL ENTRIES IN lt_ref_keys
+          WHERE ref_doc = lt_ref_keys-table_line.
+
+        " [TAMBAHAN]: Urutkan descending agar data terbaru ada di indeks teratas
+        IF it_attach[] IS NOT INITIAL.
+          SORT it_attach BY ref_doc doc_type upload_date DESCENDING attach_id DESCENDING.
+        ENDIF.
+      ENDIF.  
+    ENDIF.
+  ENDIF.
+%>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parked Documents</title>
+    <link rel="icon" type="image/png" href="logokmi.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        function toggleDetail(belnr) {
+            const detailRow = document.getElementById('detail_' + belnr);
+            const icon = document.getElementById('icon_' + belnr);
+            if (detailRow.classList.contains('hidden')) {
+                detailRow.classList.remove('hidden');
+                icon.style.transform = 'rotate(180deg)';
+            } else {
+                detailRow.classList.add('hidden');
+                icon.style.transform = 'rotate(0deg)';
+            }
+        }
+
+        let isAllExpanded = false;
+        function toggleAllDetails() {
+            isAllExpanded = !isAllExpanded;
+            const detailRows = document.querySelectorAll('tr[id^="detail_"]');
+            const icons = document.querySelectorAll('svg[id^="icon_"]');
+            const btn = document.getElementById('btnToggleAll');
+            detailRows.forEach(row => {
+                const mainRowId = row.id.replace('detail_', '');
+                const mainRow = document.querySelector(`tr[data-belnr="${mainRowId}"]`);
+                if (mainRow && mainRow.style.display !== 'none') {
+                    if (isAllExpanded) row.classList.remove('hidden');
+                    else row.classList.add('hidden');
+                }
+            });
+            icons.forEach(icon => {
+                const mainRowId = icon.id.replace('icon_', '');
+                const mainRow = document.querySelector(`tr[data-belnr="${mainRowId}"]`);
+                if (mainRow && mainRow.style.display !== 'none') {
+                    if (isAllExpanded) icon.style.transform = 'rotate(180deg)';
+                    else icon.style.transform = 'rotate(0deg)';
+                }
+            });
+            btn.innerHTML = isAllExpanded
+                ? '<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg> Collapse All'
+                : '<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg> Expand All';
+        }
+
+        function searchTable() {
+            const input = document.getElementById('searchInput').value.toUpperCase();
+            const rows = document.querySelectorAll('tr.main-row');
+            rows.forEach(row => {
+                const vendorData = row.getAttribute('data-vendor').toUpperCase();
+                const belnr = row.getAttribute('data-belnr');
+                const detailRow = document.getElementById('detail_' + belnr);
+                if (vendorData.indexOf(input) > -1) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                    if (detailRow && !detailRow.classList.contains('hidden')) {
+                        detailRow.classList.add('hidden');
+                        const icon = document.getElementById('icon_' + belnr);
+                        if (icon) icon.style.transform = 'rotate(0deg)';
+                    }
+                }
+            });
+        }
+
+        /* ─── FUNGSI APPROVAL ─── */
+        function handleReject(belnr, gjahr) {
+            let reason = prompt("Please enter the reason for rejecting Invoice " + belnr + ":");
+            if (reason === null) return false;
+            if (reason.trim() === "") {
+                alert("Rejection reason is mandatory. Action cancelled.");
+                return false;
+            }
+            document.getElementById('hiddenAction').value = 'REJ_' + belnr + '_' + gjahr;
+            document.getElementById('hiddenReason').value = reason;
+            document.getElementById('mainForm').submit();
+        }
+
+        function handleApprove(belnr, gjahr) {
+            if (confirm("Are you sure you want to approve and post Invoice " + belnr + "?")) {
+                document.getElementById('hiddenAction').value = 'APP_' + belnr + '_' + gjahr;
+                document.getElementById('mainForm').submit();
+            }
+        }
+
+        function toggleSelectAll(source) {
+            const checkboxes = document.getElementsByName('chkInvoice');
+            for(let i=0; i<checkboxes.length; i++) {
+                if(!checkboxes[i].disabled) {
+                    checkboxes[i].checked = source.checked;
+                }
+            }
+        }
+
+        function handleMassApprove() {
+            const checkboxes = document.getElementsByName('chkInvoice');
+            let selected = [];
+
+            for(let i=0; i<checkboxes.length; i++) {
+                if(checkboxes[i].checked && !checkboxes[i].disabled) {
+                    selected.push(checkboxes[i].value);
+                }
+            }
+
+            if(selected.length === 0) {
+                alert("Please select at least one valid/balanced document to approve.");
+                return;
+            }
+
+            if(confirm("Are you sure you want to approve and post " + selected.length + " selected invoice(s)?")) {
+                document.getElementById('hiddenAction').value = 'MASSAPP';
+                document.getElementById('hiddenSelectedItems').value = selected.join(',');
+                document.getElementById('mainForm').submit();
+            }
+        }
+
+        /* ─── Logout (inherited from sidebar) ─── */
+        function doLogout() {
+            if (!confirm('Yakin ingin logout?')) return;
+            sessionStorage.setItem('logged_out', '1');
+            fetch('/sap/public/bc/icf/logoff', { credentials: 'include' })
+                .finally(function() {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/sap/bc/bsp/sap/ZMIR7_BSP_AP/index.htm', true, 'logout', 'logout');
+                    xhr.onreadystatechange = function() {
+                        if (xhr.readyState === 4) {
+                            window.location.replace('/sap/bc/bsp/sap/ZMIR7_BSP_AP/index.htm');
+                        }
+                    };
+                    xhr.send();
+                });
+        }
+        window.addEventListener('pageshow', function(e) {
+            if (e.persisted && sessionStorage.getItem('logged_out') === '1') {
+                sessionStorage.removeItem('logged_out');
+                window.location.replace('/sap/public/bc/icf/logoff');
+            }
+        });
+
+        /* ─── FUNGSI MODAL GAMBAR ─── */
+        function openModal(imageSrc) {
+            const modal = document.getElementById('imageModal');
+            const modalImg = document.getElementById('modalImage');
+            modalImg.src = imageSrc;
+            modal.classList.remove('hidden');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('imageModal');
+            modal.classList.add('hidden');
+            setTimeout(() => { document.getElementById('modalImage').src = ""; }, 200);
+        }
+    </script>
+</head>
+<body class="bg-[#f8fafc] font-sans text-slate-800 flex h-screen overflow-hidden">
+
+    <%@include file="sidebar.htm" %>
+
+    <main class="flex-1 overflow-y-auto h-screen p-8">
+        <div class="max-w-[95rem] mx-auto">
+
+            <div class="mb-8">
+                <h1 class="text-3xl font-bold text-slate-800 tracking-tight">Parked Documents (Approval)</h1>
+                <p class="text-slate-500 mt-1 text-sm">Invoices that have been parked (MIR7) and are pending manager approval</p>
+            </div>
+
+            <% IF gv_message IS NOT INITIAL. %>
+                <div class="p-4 mb-6 <% IF lv_role = 'MGR' AND ls_log-action <> 'FAILED'. %>bg-[#eff6ff] border-blue-200 text-blue-800<% ELSE. %>bg-rose-50 border-rose-200 text-rose-800<% ENDIF. %> border rounded-xl font-medium shadow-sm flex
+items-center">
+                    <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <%= gv_message %>
+                </div>
+            <% ENDIF. %>
+
+            <div class="bg-[#fcfcfc] rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+
+                <div class="p-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-3">
+                    <div class="relative flex items-center gap-3 flex-wrap">
+                        <div class="relative min-w-[280px]">
+                            <input type="text" id="searchInput" onkeyup="searchTable()"
+                                   placeholder="Search by Vendor ID or Name..."
+                                   class="w-full pl-10 pr-4 py-2.5 border border-emerald-300 rounded-lg bg-emerald-50 text-sm shadow-sm
+                                          focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 focus:bg-white transition-all duration-200">
+                            <svg class="w-4 h-4 text-emerald-500 absolute left-3.5 top-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                            </svg>
+                        </div>
+
+                        <% IF lv_role = 'MGR'. %>
+                        <button type="button" onclick="handleMassApprove()" id="btnMassApprove"
+                                class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2.5 px-4 rounded-lg shadow-md transition-all duration-200 text-sm flex items-center gap-2 active:scale-95">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Approve Selected
+                        </button>
+                        <% ENDIF. %>
+
+                        <button type="button" onclick="toggleAllDetails()" id="btnToggleAll"
+                                class="bg-slate-700 hover:bg-slate-800 text-white font-medium py-2.5 px-4 rounded-lg shadow-md
+                                       transition-all duration-200 text-sm flex items-center gap-2 active:scale-95">
+                            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                            </svg> Expand All
+                        </button>
+                    </div>
+                </div>
+
+                <form method="POST" id="mainForm">
+                    <input type="hidden" id="hiddenAction" name="hiddenAction" value="">
+                    <input type="hidden" id="hiddenReason" name="hiddenReason" value="">
+                    <input type="hidden" id="hiddenSelectedItems" name="hiddenSelectedItems" value="">
+
+                    <div class="overflow-x-auto w-full">
+                        <table class="w-full min-w-[1100px] text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider whitespace-nowrap">
+                                    <th class="p-4 font-semibold w-12 text-center">Detail</th>
+                                    <th class="p-4 font-semibold w-12 text-center">
+                                        <input type="checkbox" id="chkSelectAll" onclick="toggleSelectAll(this)" class="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer">
+                                    </th>
+                                    <th class="p-4 font-semibold">Vendor / Ref.</th>
+                                    <th class="p-4 font-semibold text-center">Doc Status</th>
+                                    <th class="p-4 font-semibold text-center">Bal Status</th>
+                                    <th class="p-4 font-semibold">Bank Account</th>
+                                    <th class="p-4 font-semibold">Company</th>
+                                    <th class="p-4 font-semibold text-right">Nett Amount</th>
+                                    <th class="p-4 font-semibold">Curr.</th>
+                                    <th class="p-4 font-semibold">Parked On</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-sm">
+
+                                <% LOOP AT it_parked_inv INTO wa_inv. %>
+                                    <%
+                                        DATA: lv_vendor  TYPE string,
+                                              lv_bankn   TYPE string,
+                                              lv_banka   TYPE string,
+                                              lv_koinh   TYPE string,
+                                              lv_deadline TYPE sydatum.
+                                        DATA: lv_tot_item TYPE rbkp-rmwwr,
+                                              lv_tot_calc TYPE rbkp-rmwwr,
+                                              lv_selisih  TYPE rbkp-rmwwr.
+                                        DATA: lv_str_rmwwr TYPE c LENGTH 30,
+                                              lv_str_calc  TYPE c LENGTH 30,
+                                              lv_str_sel   TYPE c LENGTH 30,
+                                              lv_str_rseg  TYPE c LENGTH 30,
+                                              lv_str_rbco  TYPE c LENGTH 30,
+                                              lv_str_tax   TYPE c LENGTH 30,
+                                              lv_str_item  TYPE c LENGTH 30,
+                                              lv_str_beznk TYPE c LENGTH 30.
+                                        DATA: lv_is_invoice TYPE abap_bool.
+                                        DATA: lv_first_po TYPE ekko-ebeln.
+
+                                        CLEAR: lv_vendor, lv_bankn, lv_banka, lv_koinh,
+                                               lv_tot_item, lv_tot_calc, lv_selisih, lv_is_invoice,
+                                               lv_str_rmwwr, lv_str_calc, lv_str_sel, lv_first_po,
+                                               lv_str_rseg, lv_str_rbco, lv_str_tax,
+                                               lv_str_item, lv_str_beznk.
+
+                                        IF wa_inv-xrech = 'X'. lv_is_invoice = abap_true. ELSE. lv_is_invoice = abap_false. ENDIF.
+
+                                        " Ambil PO pertama sebagai key attachment jika ada
+                                        READ TABLE it_rseg INTO wa_rseg WITH KEY belnr = wa_inv-belnr gjahr = wa_inv-gjahr.
+                                        IF sy-subrc = 0. lv_first_po = wa_rseg-ebeln. ENDIF.
+
+                                        " Vendor
+                                        READ TABLE it_lfa1 INTO wa_lfa1 WITH KEY lifnr = wa_inv-lifnr.
+                                        IF sy-subrc = 0. lv_vendor = wa_lfa1-name1. ENDIF.
+
+                                        " Bank
+                                        IF wa_inv-bvtyp IS NOT INITIAL.
+                                          READ TABLE it_lfbk INTO wa_lfbk WITH KEY lifnr = wa_inv-lifnr bvtyp = wa_inv-bvtyp.
+                                        ELSE.
+                                          READ TABLE it_lfbk INTO wa_lfbk WITH KEY lifnr = wa_inv-lifnr.
+                                        ENDIF.
+                                        IF sy-subrc = 0.
+                                          lv_bankn = wa_lfbk-bankn. lv_koinh = wa_lfbk-koinh.
+                                          IF lv_koinh IS INITIAL. lv_koinh = lv_vendor. ENDIF.
+                                          READ TABLE it_bnka INTO wa_bnka WITH KEY banks = wa_lfbk-banks bankl = wa_lfbk-bankl.
+                                          IF sy-subrc = 0. lv_banka = wa_bnka-banka. ELSE. lv_banka = wa_lfbk-bankl. ENDIF.
+                                        ELSE.
+                                          lv_bankn = '-'. lv_banka = 'No bank data'. lv_koinh = '-'.
+                                        ENDIF.
+
+                                        " Deadline
+                                        lv_deadline = wa_inv-zfbdt.
+                                        IF wa_inv-zterm IS NOT INITIAL.
+                                          READ TABLE it_t052 INTO wa_t052 WITH KEY zterm = wa_inv-zterm.
+                                          IF sy-subrc = 0. lv_deadline = lv_deadline + wa_t052-ztag1. ENDIF.
+                                        ENDIF.
+
+                                        " RSEG totals
+                                        LOOP AT it_rseg INTO wa_rseg WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr.
+                                          IF lv_is_invoice = abap_true  AND wa_rseg-shkzg = 'H'. CONTINUE. ENDIF.
+                                          IF lv_is_invoice = abap_false AND wa_rseg-shkzg = 'S'. CONTINUE. ENDIF.
+                                          lv_tot_item = lv_tot_item + wa_rseg-wrbtr.
+                                        ENDLOOP.
+
+                                        " RBCO totals
+                                        LOOP AT it_rbco INTO wa_rbco WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr.
+                                          READ TABLE it_rseg TRANSPORTING NO FIELDS WITH KEY belnr = wa_rbco-belnr gjahr = wa_rbco-gjahr buzei = wa_rbco-buzei.
+                                          IF sy-subrc <> 0.
+                                            IF lv_is_invoice = abap_true  AND wa_rbco-shkzg = 'H'. CONTINUE. ENDIF.
+                                            IF lv_is_invoice = abap_false AND wa_rbco-shkzg = 'S'. CONTINUE. ENDIF.
+                                            lv_tot_item = lv_tot_item + wa_rbco-wrbtr.
+                                          ENDIF.
+                                        ENDLOOP.
+
+                                        " Balance
+                                        lv_tot_calc = lv_tot_item + wa_inv-wmwst1 + wa_inv-beznk.
+                                        lv_selisih  = wa_inv-rmwwr - lv_tot_calc.
+
+                                        " String formatting
+                                        WRITE wa_inv-rmwwr  TO lv_str_rmwwr CURRENCY wa_inv-waers. CONDENSE lv_str_rmwwr.
+                                        WRITE lv_tot_calc   TO lv_str_calc  CURRENCY wa_inv-waers. CONDENSE lv_str_calc.
+                                        WRITE lv_selisih    TO lv_str_sel   CURRENCY wa_inv-waers. CONDENSE lv_str_sel.
+                                        WRITE lv_tot_item   TO lv_str_item  CURRENCY wa_inv-waers. CONDENSE lv_str_item.
+                                        WRITE wa_inv-wmwst1 TO lv_str_tax   CURRENCY wa_inv-waers. CONDENSE lv_str_tax.
+                                        WRITE wa_inv-beznk  TO lv_str_beznk CURRENCY wa_inv-waers. CONDENSE lv_str_beznk.
+                                    %>
+
+                                    <tr class="main-row border-b border-slate-100 hover:bg-[#f1f5f9] transition-colors bg-white"
+                                        data-vendor="<%= wa_inv-lifnr %> <%= lv_vendor %>"
+                                        data-belnr="<%= wa_inv-belnr %>">
+
+                                        <td class="p-4 text-center align-middle whitespace-nowrap">
+                                            <button type="button" onclick="toggleDetail('<%= wa_inv-belnr %>')"
+                                                    class="p-1.5 rounded-md hover:bg-slate-200 transition-colors bg-slate-100 text-slate-500">
+                                                <svg id="icon_<%= wa_inv-belnr %>" class="w-4 h-4 transition-transform duration-200"
+                                                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                                </svg>
+                                            </button>
+                                        </td>
+
+                                        <td class="p-4 text-center align-middle whitespace-nowrap">
+                                            <input type="checkbox" name="chkInvoice" value="<%= wa_inv-belnr %>_<%= wa_inv-gjahr %>"
+                                                   class="chk-invoice w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                                                   <% IF lv_selisih <> 0. %>disabled title="Blocked: Not Balanced"<% ENDIF. %>>
+                                        </td>
+
+                                        <td class="p-4 align-middle whitespace-nowrap">
+                                            <div class="font-bold text-slate-800"><%= wa_inv-belnr %></div>
+                                            <div class="text-xs text-slate-500 mt-0.5">
+                                                <% IF wa_inv-xblnr IS NOT INITIAL. %>
+                                                    Ref: <span class="font-medium text-slate-600"><%= wa_inv-xblnr %></span>
+                                                <% ELSE. %><i>No reference</i><% ENDIF. %>
+                                            </div>
+                                            <div class="text-xs text-slate-400 mt-0.5 truncate max-w-[180px]"><%= lv_vendor %></div>
+                                        </td>
+
+                                        <td class="p-4 align-middle text-center whitespace-nowrap">
+                                            <% IF wa_inv-rbstat = 'A'. %>
+                                                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200 shadow-sm">Saved as Parked</span>
+                                            <% ELSEIF wa_inv-rbstat = 'B'. %>
+                                                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-sky-100 text-sky-800 border border-sky-200 shadow-sm">Parked &amp; Completed</span>
+                                            <% ELSE. %>
+                                                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200 shadow-sm"><%= wa_inv-rbstat %></span>
+                                            <% ENDIF. %>
+                                        </td>
+
+                                        <td class="p-4 align-middle text-center whitespace-nowrap">
+                                            <% IF lv_selisih = 0. %>
+                                                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-sm">
+                                                    <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                                                    </svg> Balanced
+                                                </span>
+                                            <% ELSE. %>
+                                                <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-rose-100 text-rose-800 border border-rose-200 shadow-sm">
+                                                    <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                                                    </svg> Not Balanced
+                                                </span>
+                                            <% ENDIF. %>
+                                        </td>
+
+                                        <td class="p-4 align-middle whitespace-nowrap">
+                                            <div class="font-bold text-indigo-600 tracking-wide"><%= lv_bankn %></div>
+                                            <div class="text-[11px] text-slate-500 mt-0.5 uppercase truncate max-w-[150px]" title="<%= lv_koinh %>"><%= lv_koinh %></div>
+                                        </td>
+
+                                        <td class="p-4 font-medium text-slate-600 align-middle whitespace-nowrap"><%= wa_inv-bukrs %></td>
+
+                                        <td class="p-4 align-middle font-bold text-slate-700 whitespace-nowrap text-right">
+                                            <%= lv_str_rmwwr %>
+                                        </td>
+
+                                        <td class="p-4 text-slate-500 font-medium align-middle whitespace-nowrap"><%= wa_inv-waers %></td>
+
+                                        <td class="p-4 align-middle whitespace-nowrap text-slate-500 text-xs">
+                                            <%= wa_inv-cpudt+6(2) %>.<%= wa_inv-cpudt+4(2) %>.<%= wa_inv-cpudt(4) %>
+                                        </td>
+                                    </tr>
+
+                                    <tr id="detail_<%= wa_inv-belnr %>" class="hidden bg-[#f8fafc] border-b border-slate-200">
+                                        <td colspan="10" class="p-0">
+                                            <div class="p-6 border-l-4 border-emerald-400 m-5 bg-white rounded-xl shadow-sm border border-slate-200 min-w-[800px]">
+
+                                                <div class="mb-5 pb-3 border-b border-slate-100 flex justify-between items-center">
+                                                    <h2 class="text-base font-bold text-slate-800">
+                                                        Document Detail:
+                                                        <span class="text-emerald-600">INV-<%= wa_inv-lifnr %></span>
+                                                        <span class="text-slate-400 font-normal ml-1">/ Year: <%= wa_inv-gjahr %></span>
+                                                    </h2>
+                                                    <span class="text-xs text-slate-400 font-medium">Parked: <%= wa_inv-cpudt+6(2) %>.<%= wa_inv-cpudt+4(2) %>.<%= wa_inv-cpudt(4) %></span>
+                                                </div>
+
+                                                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mb-6">
+
+                                                    <div class="rounded-lg p-4 bg-[#f8fafc] border border-slate-100">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Vendor Information</h3>
+                                                        <div class="font-bold text-sm text-slate-800"><%= wa_inv-lifnr %></div>
+                                                        <div class="font-medium text-slate-600 text-[13px] mt-1"><%= lv_vendor %></div>
+                                                    </div>
+
+                                                    <div class="rounded-lg p-4 bg-[#f8fafc] border border-slate-100">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Payment Destination</h3>
+                                                        <div class="text-[13px] space-y-1.5">
+                                                            <div class="flex justify-between"><span>Bank:</span> <span class="font-semibold text-slate-700"><%= lv_banka %></span></div>
+                                                            <div class="flex justify-between"><span>Acct:</span> <span class="font-bold text-indigo-600"><%= lv_bankn %></span></div>
+                                                            <div class="flex justify-between"><span>Name:</span> <span class="font-medium text-slate-600 truncate max-w-[120px]"><%= lv_koinh %></span></div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="rounded-lg p-4 bg-[#f8fafc] border border-slate-100">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Dates &amp; Deadlines</h3>
+                                                        <div class="text-[13px] space-y-1.5">
+                                                            <div class="flex justify-between"><span>Invoice Date:</span> <span class="font-medium text-slate-700"><%= wa_inv-bldat+6(2) %>.<%= wa_inv-bldat+4(2) %>.<%= wa_inv-bldat(4) %></span></div>
+                                                            <div class="flex justify-between"><span>Posting Date:</span> <span class="font-medium text-slate-700"><%= wa_inv-budat+6(2) %>.<%= wa_inv-budat+4(2) %>.<%= wa_inv-budat(4) %></span></div>
+                                                            <div class="flex justify-between font-bold text-red-600 pt-1"><span>Due Date:</span> <span><%= lv_deadline+6(2) %>.<%= lv_deadline+4(2) %>.<%= lv_deadline(4) %></span></div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="rounded-lg p-4 bg-[#f8fafc] border border-slate-100">
+                                                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Financial Summary</h3>
+                                                        <div class="text-[13px] space-y-1.5">
+                                                            <div class="flex justify-between text-slate-500"><span>Items Total:</span> <span><%= lv_str_item %></span></div>
+                                                            <div class="flex justify-between text-slate-500"><span>Tax Total:</span> <span>+ <%= lv_str_tax %></span></div>
+                                                            <% IF wa_inv-beznk <> 0. %>
+                                                            <div class="flex justify-between text-slate-500"><span>Unplanned Cost:</span> <span>+ <%= lv_str_beznk %></span></div>
+                                                            <% ENDIF. %>
+                                                            <div class="flex justify-between font-semibold text-slate-700 pt-1 border-t border-slate-200 mt-1"><span>System Calc:</span> <span><%= lv_str_calc %></span></div>
+                                                            <div class="flex justify-between font-bold text-emerald-600"><span>Nett:</span> <span><%= lv_str_rmwwr %></span></div>
+                                                            <% IF lv_selisih <> 0. %>
+                                                            <div class="flex justify-between font-bold text-rose-600 border-t border-slate-200 pt-1 mt-1"><span>Difference:</span> <span><%= lv_str_sel %></span></div>
+                                                            <% ENDIF. %>
+                                                        </div>
+                                                    </div>
+
+                                                </div><div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                                                    <div>
+                                                        <h4 class="font-bold text-slate-700 mb-2 text-xs uppercase tracking-wider">Material Items (RSEG)</h4>
+                                                        <table class="w-full text-left text-[12px] border border-slate-200 rounded-lg overflow-hidden">
+                                                            <thead>
+                                                                <tr class="bg-slate-50 text-slate-500 border-b border-slate-200">
+                                                                    <th class="p-2.5 font-semibold">Itm</th>
+                                                                    <th class="p-2.5 font-semibold">PO Number</th>
+                                                                    <th class="p-2.5 font-semibold">Material</th>
+                                                                    <th class="p-2.5 font-semibold text-right">Value</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                <% LOOP AT it_rseg INTO wa_rseg WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr. %>
+                                                                    <% IF lv_is_invoice = abap_true  AND wa_rseg-shkzg = 'H'. CONTINUE. ENDIF. %>
+                                                                    <% IF lv_is_invoice = abap_false AND wa_rseg-shkzg = 'S'. CONTINUE. ENDIF. %>
+                                                                    <% CLEAR lv_str_rseg. WRITE wa_rseg-wrbtr TO lv_str_rseg CURRENCY wa_inv-waers. CONDENSE lv_str_rseg. %>
+                                                                    <tr class="border-b border-slate-100 last:border-0">
+                                                                        <td class="p-2.5"><%= wa_rseg-buzei %></td>
+                                                                        <td class="p-2.5 text-indigo-600 font-medium"><%= wa_rseg-ebeln %></td>
+                                                                        <td class="p-2.5 text-slate-600"><%= wa_rseg-matnr %></td>
+                                                                        <td class="p-2.5 text-right font-medium"><%= lv_str_rseg %></td>
+                                                                    </tr>
+                                                                <% ENDLOOP. %>
+                                                                <% IF sy-subrc <> 0. %>
+                                                                    <tr><td colspan="4" class="p-3 text-center text-slate-400 italic">No material items found</td></tr>
+                                                                <% ENDIF. %>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+
+                                                    <div>
+                                                        <h4 class="font-bold text-slate-700 mb-2 text-xs uppercase tracking-wider">G/L &amp; Cost Center (RBCO)</h4>
+                                                        <table class="w-full text-left text-[12px] border border-slate-200 rounded-lg overflow-hidden">
+                                                            <thead>
+                                                                <tr class="bg-slate-50 text-slate-500 border-b border-slate-200">
+                                                                    <th class="p-2.5 font-semibold">Itm</th>
+                                                                    <th class="p-2.5 font-semibold">G/L Account</th>
+                                                                    <th class="p-2.5 font-semibold">Cost Ctr</th>
+                                                                    <th class="p-2.5 font-semibold text-right">Value</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                <% LOOP AT it_rbco INTO wa_rbco WHERE belnr = wa_inv-belnr AND gjahr = wa_inv-gjahr. %>
+                                                                    <% IF lv_is_invoice = abap_true  AND wa_rbco-shkzg = 'H'. CONTINUE. ENDIF. %>
+                                                                    <% IF lv_is_invoice = abap_false AND wa_rbco-shkzg = 'S'. CONTINUE. ENDIF. %>
+                                                                    <% CLEAR lv_str_rbco. WRITE wa_rbco-wrbtr TO lv_str_rbco CURRENCY wa_inv-waers. CONDENSE lv_str_rbco. %>
+                                                                    <tr class="border-b border-slate-100 last:border-0">
+                                                                        <td class="p-2.5"><%= wa_rbco-buzei %></td>
+                                                                        <td class="p-2.5 text-slate-600 font-medium"><%= wa_rbco-saknr %></td>
+                                                                        <td class="p-2.5 text-slate-600"><%= wa_rbco-kostl %></td>
+                                                                        <td class="p-2.5 text-right font-medium"><%= lv_str_rbco %></td>
+                                                                    </tr>
+                                                                <% ENDLOOP. %>
+                                                                <% IF sy-subrc <> 0. %>
+                                                                    <tr><td colspan="4" class="p-3 text-center text-slate-400 italic">No G/L items found</td></tr>
+                                                                <% ENDIF. %>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+
+                                                </div>
+
+                                                <div class="mt-8 pt-6 border-t border-slate-200">
+                                                    <h4 class="font-bold text-slate-700 mb-4 text-xs uppercase tracking-wider flex items-center gap-2">
+                                                        <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5
+13"></path>
+                                                        </svg>
+                                                        Attached Documents
+                                                    </h4>
+                                                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                                                        <%
+                                                          DATA: lt_doc_types TYPE TABLE OF string,
+                                                                lv_dtype     TYPE string,
+                                                                lv_base64    TYPE string,
+                                                                lv_doc_title TYPE string.
+
+                                                          CLEAR lt_doc_types.
+                                                          APPEND 'INV' TO lt_doc_types.
+                                                          APPEND 'PO'  TO lt_doc_types.
+                                                          APPEND 'GR'  TO lt_doc_types.
+                                                          APPEND 'TAX' TO lt_doc_types.
+
+                                                          LOOP AT lt_doc_types INTO lv_dtype.
+                                                              IF lv_dtype = 'INV'. lv_doc_title = '1. Invoice'.
+                                                              ELSEIF lv_dtype = 'PO'. lv_doc_title = '2. Purchase Order'.
+                                                              ELSEIF lv_dtype = 'GR'. lv_doc_title = '3. Goods Receipt'.
+                                                              ELSEIF lv_dtype = 'TAX'. lv_doc_title = '4. Faktur Pajak'.
+                                                              ENDIF.
+
+                                                              " Coba cari berdasarkan Nomor Invoice Parkir
+                                                              READ TABLE it_attach INTO wa_attach WITH KEY doc_type = lv_dtype ref_doc = wa_inv-belnr.
+                                                              IF sy-subrc <> 0 AND lv_first_po IS NOT INITIAL.
+                                                                  " Coba cari berdasarkan Nomor PO (Karena saat upload yang tersimpan adalah ref PO)
+                                                                  READ TABLE it_attach INTO wa_attach WITH KEY doc_type = lv_dtype ref_doc = lv_first_po.
+                                                              ENDIF.
+
+                                                              IF sy-subrc = 0.
+                                                                  CLEAR lv_base64.
+                                                                  CALL FUNCTION 'SCMS_BASE64_ENCODE_STR'
+                                                                    EXPORTING
+                                                                      input  = wa_attach-file_content
+                                                                    IMPORTING
+                                                                      output = lv_base64.
+                                                        %>
+                                                        <div class="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-sm flex flex-col">
+                                                            <div class="bg-slate-50 px-3 py-2 border-b border-slate-200 flex justify-between items-center">
+                                                                <span class="text-xs font-bold text-slate-700"><%= lv_doc_title %></span>
+                                                                <span class="text-[10px] text-slate-400 truncate max-w-[100px]" title="<%= wa_attach-file_name %>"><%= wa_attach-file_name %></span>
+                                                            </div>
+                                                            <div class="h-40 bg-slate-100 p-2 flex items-center justify-center relative group">
+                                                                <% IF wa_attach-file_type CS 'image'. %>
+                                                                    <img src="data:<%= wa_attach-file_type %>;base64,<%= lv_base64 %>" class="max-h-full max-w-full object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
+                                                                         onclick="openModal(this.src)" title="Perbesar Gambar" />
+                                                                <% ELSEIF wa_attach-file_type CS 'pdf'. %>
+                                                                    <object data="data:application/pdf;base64,<%= lv_base64 %>" type="application/pdf" class="w-full h-full rounded"></object>
+                                                                    <div class="absolute inset-0 bg-slate-900/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
+                                                                        <a href="data:application/pdf;base64,<%= lv_base64 %>" download="<%= wa_attach-file_name %>" class="bg-white text-emerald-700 text-xs font-bold py-2 px-4 rounded shadow
+                                                                           hover:bg-emerald-50 transition-colors">Download PDF</a>
+                                                                    </div>
+                                                                <% ELSE. %>
+                                                                    <a href="data:<%= wa_attach-file_type %>;base64,<%= lv_base64 %>" download="<%= wa_attach-file_name %>" class="text-emerald-600 text-xs font-bold underline
+hover:text-emerald-800">Download File</a>
+                                                                <% ENDIF. %>
+                                                            </div>
+                                                        </div>
+                                                        <% ELSE. %>
+                                                        <div class="border border-dashed border-slate-300 rounded-lg overflow-hidden bg-slate-50 flex flex-col justify-center items-center h-[194px] text-center p-4">
+                                                            <svg class="w-8 h-8 text-slate-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m5 5H7a2
+2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                                            <span class="text-xs font-bold text-slate-500 mb-1"><%= lv_doc_title %></span>
+                                                            <span class="text-[10px] text-slate-400">Belum dilampirkan</span>
+                                                        </div>
+                                                        <% ENDIF. ENDLOOP. %>
+                                                    </div>
+                                                </div>
+
+                                                <div class="mt-8 pt-5 border-t border-slate-200 flex justify-end gap-3">
+                                                    <% IF lv_role = 'MGR'. %>
+                                                        <button type="button" onclick="handleReject('<%= wa_inv-belnr %>', '<%= wa_inv-gjahr %>')" class="bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-semibold py-2 px-6 rounded-md
+shadow-sm transition-colors text-sm">Reject</button>
+                                                        <% IF lv_selisih <> 0. %>
+                                                            <button type="button" disabled title="Document must be balanced before approval" class="bg-slate-300 text-slate-500 font-semibold py-2 px-6 rounded-md shadow-sm text-sm cursor-not-allowed
+opacity-60">Approve</button>
+                                                        <% ELSE. %>
+                                                            <button type="button" onclick="handleApprove('<%= wa_inv-belnr %>', '<%= wa_inv-gjahr %>')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 px-6 rounded-md shadow-sm
+transition-colors text-sm">Approve</button>
+                                                        <% ENDIF. %>
+                                                    <% ELSE. %>
+                                                        <span class="inline-flex items-center px-4 py-2 rounded-md text-sm font-semibold bg-slate-100 text-slate-400 border border-slate-200">
+                                                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016
+0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg> View Only
+                                                        </span>
+                                                    <% ENDIF. %>
+                                                </div>
+
+                                            </div>
+                                        </td>
+                                    </tr>
+
+                            <% ENDLOOP. %>
+
+                            <% IF it_parked_inv IS INITIAL. %>
+                            <tr>
+                                <td colspan="10" class="p-16 text-center">
+                                    <svg class="w-12 h-12 text-slate-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                              d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
+                                    </svg>
+                                    <div class="text-slate-500 font-medium text-base">No parked documents found</div>
+                                    <div class="text-slate-400 mt-1 text-sm">All documents have been processed or the queue is empty.</div>
+                                </td>
+                            </tr>
+                            <% ENDIF. %>
+
+                        </tbody>
+                    </table>
+                </div>
+            </form>
+            </div>
+        </div>
+    </main>
+
+    <div id="imageModal" class="fixed inset-0 z-[9999] bg-slate-900/80 hidden flex justify-center items-center backdrop-blur-sm transition-opacity" onclick="closeModal()">
+        <span class="absolute top-5 right-8 text-white text-4xl font-bold cursor-pointer hover:text-slate-300 transition-colors">&times;</span>
+        <img id="modalImage" class="max-w-[90%] max-h-[90%] object-contain rounded-lg shadow-2xl" src="" alt="Enlarged Document">
+    </div>
+</body>
+</html>
