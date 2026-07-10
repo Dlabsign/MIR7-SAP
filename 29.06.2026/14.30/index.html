@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KITE Monitoring — Kontrol PIB Outstanding (SAP S/4HANA)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy:#0E2A47;--navy-2:#15375C;--navy-deep:#0A2038;
+    --gold:#C8A04B;--gold-soft:#E8D29A;
+    --paper:#EDF1F5;--surface:#FFFFFF;--ink:#16202E;--muted:#647488;
+    --line:#E2E8F0;--line-2:#EEF2F6;
+    --ok:#137A5B;--ok-soft:#D7EFE6;
+    --warn:#B7791F;--warn-soft:#FBEED2;
+    --alert:#B5302B;--alert-soft:#F7DEDC;
+    --info:#2A5F8F;
+    --r:13px;--shadow:0 1px 2px rgba(14,42,71,.06),0 8px 26px rgba(14,42,71,.07);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:"Plus Jakarta Sans",system-ui,sans-serif;color:var(--ink);
+    background:radial-gradient(1100px 560px at 90% -12%,rgba(200,160,75,.09),transparent 60%),var(--paper);
+    -webkit-font-smoothing:antialiased;line-height:1.5}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .app{max-width:1340px;margin:0 auto;padding:20px clamp(14px,3vw,30px) 46px}
+
+  /* topbar */
+  .topbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;color:#fff;
+    background:linear-gradient(115deg,var(--navy-deep),var(--navy) 55%,var(--navy-2));
+    border-radius:16px;padding:16px 20px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .topbar::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 62%,rgba(200,160,75,.16));pointer-events:none}
+  .brand{display:flex;align-items:center;gap:13px}
+  .crest{width:44px;height:44px;border-radius:11px;background:linear-gradient(160deg,var(--gold),#9c7a2e);
+    display:grid;place-items:center;color:var(--navy-deep);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+  .crest svg{width:25px;height:25px}
+  .brand h1{margin:0;font-size:1.08rem;font-weight:800;letter-spacing:-.01em}
+  .brand p{margin:1px 0 0;font-size:.72rem;color:#B9CADF;font-weight:500;text-transform:uppercase;letter-spacing:.09em}
+  .sap-chip{margin-left:auto;display:flex;align-items:center;gap:10px;z-index:1;flex-wrap:wrap}
+  .sync{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:7px 12px;font-size:.76rem;color:#D7E2F0}
+  .sync b{color:#fff;font-weight:700}
+  .live{width:7px;height:7px;border-radius:50%;background:#43D6A0;box-shadow:0 0 0 3px rgba(67,214,160,.22)}
+  .btn{font:inherit;font-size:.78rem;font-weight:600;border:1px solid rgba(255,255,255,.2);
+    background:rgba(255,255,255,.1);color:#fff;border-radius:9px;padding:8px 14px;cursor:pointer}
+  .btn:focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+  /* data source banner */
+  .source{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:13px;font-size:.76rem;
+    background:#fff;border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:10px;padding:9px 13px;color:var(--muted)}
+  .source .tag{font-weight:700;color:var(--ink)}
+  .source code{font-family:"IBM Plex Mono",monospace;background:var(--line-2);padding:1px 6px;border-radius:5px;color:var(--navy)}
+
+  .eyebrow{font-size:.69rem;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--gold);
+    display:flex;align-items:center;gap:8px;margin:22px 0 13px}
+  .eyebrow::before{content:"";width:20px;height:2px;background:var(--gold);border-radius:2px}
+
+  /* KPI */
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:13px}
+  .kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 15px;
+    box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--navy)}
+  .kpi.warn::before{background:var(--warn)}
+  .kpi.alert::before{background:var(--alert)}
+  .kpi.gold::before{background:var(--gold)}
+  .kpi .label{font-size:.71rem;color:var(--muted);font-weight:600;min-height:2.1em;line-height:1.3}
+  .kpi .val{font-size:1.34rem;font-weight:600;margin-top:7px}
+  .kpi .val small{font-size:.74rem;color:var(--muted);font-weight:500}
+  .kpi .note{font-size:.7rem;color:var(--muted);margin-top:6px}
+  .kpi .note.bad{color:var(--alert);font-weight:600}
+  .kpi .note.mid{color:var(--warn);font-weight:600}
+  .meter{height:5px;border-radius:4px;background:#EAF0F6;margin-top:9px;overflow:hidden}
+  .meter i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--ok),#3FB489)}
+
+  /* two-col band */
+  .band{display:grid;grid-template-columns:1fr 1.35fr;gap:15px;margin-top:18px}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+    padding:16px 17px 18px;box-shadow:var(--shadow)}
+  .panel h2{font-size:.98rem;margin:0 0 2px;font-weight:700}
+  .panel .sub{font-size:.73rem;color:var(--muted);margin-bottom:12px}
+
+  /* aging buckets */
+  .aging{display:flex;flex-direction:column;gap:12px;margin-top:4px}
+  .agerow{display:grid;grid-template-columns:118px 1fr 78px;align-items:center;gap:11px}
+  .agerow .nm{font-size:.8rem;font-weight:600;display:flex;align-items:center;gap:7px}
+  .agerow .nm .d{width:8px;height:8px;border-radius:2px}
+  .track{height:11px;background:var(--line-2);border-radius:6px;overflow:hidden}
+  .track i{display:block;height:100%;border-radius:6px}
+  .agerow .v{font-family:"IBM Plex Mono",monospace;font-size:.78rem;text-align:right;color:var(--muted)}
+
+  /* SAP flow stepper */
+  .stepper{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:0;margin-top:6px}
+  .step{border:1px solid var(--line);border-radius:11px;padding:12px 13px;background:#FAFBFD;min-width:0}
+  .step .h{display:flex;align-items:center;gap:7px;font-size:.78rem;font-weight:700}
+  .step .h .s{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+  .step .doc{font-family:"IBM Plex Mono",monospace;font-size:.68rem;color:var(--info);font-weight:600;margin-top:5px}
+  .step .meta{font-size:.7rem;color:var(--muted);margin-top:5px;line-height:1.4}
+  .step.trig{border-color:var(--gold);background:rgba(200,160,75,.08)}
+  .arrow{display:grid;place-items:center;color:var(--gold);min-width:30px}
+  .arrow svg{width:20px;height:20px}
+  .splitnote{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;font-size:.74rem}
+  .vchip{border:1px dashed var(--line);border-radius:9px;padding:8px 11px;background:#fff;flex:1;min-width:180px}
+  .vchip b{font-family:"IBM Plex Mono",monospace}
+  .vchip .t{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:700}
+  .vchip.k{border-color:var(--gold);border-style:solid}
+
+  /* table */
+  .tablecard{margin-top:18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:var(--shadow);overflow:hidden}
+  .tc-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:16px 18px 6px}
+  .tc-head h2{margin:0;font-size:1rem;font-weight:700}
+  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .search{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:9px;padding:6px 11px;background:#fff}
+  .search svg{width:15px;height:15px;color:var(--muted)}
+  .search input{border:0;outline:0;font:inherit;font-size:.8rem;width:160px;background:transparent}
+  .filters{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font:inherit;font-size:.74rem;font-weight:600;border:1px solid var(--line);background:#fff;color:var(--muted);
+    border-radius:20px;padding:6px 12px;cursor:pointer;transition:.15s}
+  .chip[aria-pressed="true"]{background:var(--navy);color:#fff;border-color:var(--navy)}
+  .chip.danger[aria-pressed="true"]{background:var(--alert);border-color:var(--alert)}
+  .chip:focus-visible,.search:focus-within{outline:2px solid var(--navy);outline-offset:2px}
+  .btn-ghost{font:inherit;font-size:.76rem;font-weight:600;border:1px solid var(--line);background:#fff;color:var(--navy);
+    border-radius:9px;padding:7px 12px;cursor:pointer}
+  .tbl-scroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;min-width:1040px;font-size:.83rem}
+  thead th{position:sticky;top:0;background:#F7F9FB;text-align:left;font-size:.67rem;letter-spacing:.05em;
+    text-transform:uppercase;color:var(--muted);font-weight:700;padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.r,tbody td.r{text-align:right}
+  tbody td{padding:11px 14px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#FAFBFD}
+  td.m,th.m{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  .pib{font-family:"IBM Plex Mono",monospace;font-weight:700;color:var(--navy)}
+  .matn{font-weight:600}
+  .matn small{display:block;font-size:.7rem;color:var(--muted);font-weight:500;font-family:"IBM Plex Mono",monospace}
+  .prog{display:inline-flex;align-items:center;gap:8px}
+  .prog .pb{width:54px;height:6px;border-radius:4px;background:var(--line-2);overflow:hidden}
+  .prog .pb i{display:block;height:100%;background:var(--ok)}
+  .cd{display:inline-flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;font-weight:600}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:.71rem;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap}
+  .pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+  .pill.ok{color:var(--ok);background:var(--ok-soft)}
+  .pill.warn{color:var(--warn);background:var(--warn-soft)}
+  .pill.alert{color:var(--alert);background:var(--alert-soft)}
+  .gr{font-size:.71rem;font-weight:600;color:var(--info)}
+  .gr.part{color:var(--warn)}
+  .empty{padding:34px;text-align:center;color:var(--muted);font-size:.85rem}
+
+  /* sticky PIB column so the number stays visible while scrolling */
+  thead th:first-child{position:sticky;left:0;z-index:3;background:#F7F9FB;box-shadow:1px 0 0 var(--line)}
+  tbody td:first-child{position:sticky;left:0;z-index:1;background:#fff;box-shadow:1px 0 0 var(--line-2)}
+  tbody tr:hover td:first-child{background:#FAFBFD}
+  /* clickable rows */
+  tbody tr.rowlink{cursor:pointer}
+  tbody tr.rowlink:focus-visible{outline:2px solid var(--navy);outline-offset:-2px}
+  .pib{display:inline-flex;align-items:center;gap:5px}
+  .pib .open{color:var(--gold);font-weight:700}
+  .cnt{font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:700;color:var(--muted);
+    background:var(--line-2);border-radius:20px;padding:2px 9px;margin-left:8px}
+
+  /* ---- detail modal ---- */
+  .modal-bg{position:fixed;inset:0;background:rgba(10,32,56,.55);backdrop-filter:blur(3px);
+    display:none;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:60;overflow-y:auto}
+  .modal-bg.open{display:flex}
+  .modal{background:var(--surface);border-radius:16px;width:100%;max-width:640px;overflow:hidden;
+    box-shadow:0 26px 64px rgba(10,32,56,.4);animation:pop .18s ease}
+  @keyframes pop{from{transform:translateY(10px) scale(.99);opacity:0}to{transform:none;opacity:1}}
+  .m-head{background:linear-gradient(120deg,var(--navy-deep),var(--navy) 60%,var(--navy-2));color:#fff;padding:18px 20px;position:relative}
+  .m-head .ttl{font-family:"IBM Plex Mono",monospace;font-size:1.5rem;font-weight:700;display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+  .m-head .mat{font-size:.86rem;color:#C7D6E8;margin-top:3px}
+  .m-close{position:absolute;top:13px;right:13px;width:32px;height:32px;border-radius:9px;border:1px solid rgba(255,255,255,.22);
+    background:rgba(255,255,255,.1);color:#fff;font-size:1.1rem;line-height:1;cursor:pointer}
+  .m-close:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .m-body{padding:18px 20px 22px}
+  .m-banner{display:flex;align-items:center;gap:10px;border-radius:11px;padding:11px 14px;font-size:.84rem;font-weight:600}
+  .m-banner.ok{background:var(--ok-soft);color:var(--ok)}
+  .m-banner.warn{background:var(--warn-soft);color:var(--warn)}
+  .m-banner.alert{background:var(--alert-soft);color:var(--alert)}
+  .facts{display:grid;grid-template-columns:1fr 1fr;gap:13px 18px;margin:17px 0}
+  .fact .k{font-size:.66rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700}
+  .fact .v{font-weight:600;margin-top:3px}
+  .fact .v.m{font-family:"IBM Plex Mono",monospace}
+  .m-sec{font-size:.69rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--gold);
+    margin:18px 0 10px;display:flex;align-items:center;gap:8px}
+  .m-sec::before{content:"";width:16px;height:2px;background:var(--gold)}
+  .flow4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+  .flow4 .c{border:1px solid var(--line);border-radius:10px;padding:9px 6px;background:#FAFBFD}
+  .flow4 .c .n{font-family:"IBM Plex Mono",monospace;font-weight:700;font-size:1rem}
+  .flow4 .c .l{font-size:.66rem;color:var(--muted);margin-top:2px}
+  .flow4 .c.out{border-color:var(--gold);background:rgba(200,160,75,.08)}
+  .bigbar{height:13px;border-radius:7px;background:var(--line-2);overflow:hidden;margin:12px 0 4px;display:flex}
+  .bigbar i{height:100%}
+  .bigbar .exp{background:var(--ok)}
+  .bigbar .out{background:var(--gold)}
+  .barleg{display:flex;gap:16px;font-size:.74rem;color:var(--muted);flex-wrap:wrap}
+  .barleg span{display:inline-flex;align-items:center;gap:6px}
+  .barleg .sw{width:10px;height:10px;border-radius:3px}
+  .valbox{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
+  .vcell{border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+  .vcell .k{font-size:.66rem;text-transform:uppercase;color:var(--muted);font-weight:700;letter-spacing:.05em}
+  .vcell .v{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:1.02rem;margin-top:4px}
+  .vcell.exp{border-color:var(--alert);background:var(--alert-soft)}
+  .vcell.exp .v{color:var(--alert)}
+  .callout{margin-top:14px;border-radius:11px;padding:12px 14px;font-size:.82rem;line-height:1.5;
+    background:var(--alert-soft);color:var(--alert);border:1px solid rgba(181,48,43,.25)}
+  .callout b{color:var(--alert)}
+  @media(max-width:540px){.facts{grid-template-columns:1fr}.valbox{grid-template-columns:1fr}.flow4{grid-template-columns:1fr 1fr}}
+
+  footer{margin-top:24px;font-size:.74rem;color:var(--muted);line-height:1.65;border-top:1px solid var(--line);padding-top:15px}
+  footer b{color:var(--ink)}
+
+  @media(max-width:1080px){.kpis{grid-template-columns:repeat(3,1fr)}.band{grid-template-columns:1fr}
+    .stepper{grid-template-columns:1fr;gap:10px}.arrow{transform:rotate(90deg);min-width:0;padding:2px 0}}
+  @media(max-width:640px){.kpis{grid-template-columns:repeat(2,1fr)}.search input{width:110px}}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="crest" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2 3 6v6c0 5 3.8 8.4 9 10 5.2-1.6 9-5 9-10V6l-9-4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m8.5 12 2.4 2.4L16 9.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <div><h1>KITE Monitoring — Kontrol PIB Outstanding</h1><p>SAP S/4HANA · CDS ZC_KITE_OUTSTANDING (OData V4)</p></div>
+    </div>
+    <div class="sap-chip">
+      <span class="sync"><span class="live"></span>GR sync <b id="grSync">08:40 WIB</b></span>
+      <button class="btn" type="button" id="reload">Tarik ulang ⟳</button>
+    </div>
+  </header>
+
+  <div class="source">
+    <span class="tag" id="srcTag">● Mode demo</span>
+    <span id="srcMsg">Memakai data contoh. Untuk go-live, isi <code>ODATA_URL</code> di dalam berkas dengan endpoint CDS Anda — dashboard langsung membaca data SAP.</span>
+  </div>
+
+  <p class="eyebrow">Status Kewajiban Ekspor — per <span id="asof">30 Jun 2026</span></p>
+  <section class="kpis" id="kpis" aria-label="Indikator kontrol PIB"></section>
+
+  <section class="band">
+    <div class="panel">
+      <h2>Aging Outstanding per Jatuh Tempo</h2>
+      <div class="sub">Nilai bahan baku belum diekspor · Rp juta (valuasi KITE)</div>
+      <div class="aging" id="aging"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Aliran Data dari SAP</h2>
+      <div class="sub">PO valuasi terpisah → GR sebagai pemicu → konsumsi produksi → PEB</div>
+      <div class="stepper">
+        <div class="step">
+          <div class="h"><span class="s"></span>1 · Purchase Order</div>
+          <div class="doc">EKKO/EKPO · split valuation</div>
+          <div class="meta">Tipe valuasi pisahkan KITE vs impor normal sejak PO.</div>
+        </div>
+        <div class="arrow"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12h15m-6-6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="step trig">
+          <div class="h"><span class="s"></span>2 · Goods Receipt</div>
+          <div class="doc">MIGO 101 · BAdI pemicu</div>
+          <div class="meta">GR posting upsert PIB + qty + nilai ke ZKITE_MON.</div>
+        </div>
+        <div class="arrow"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12h15m-6-6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="step">
+          <div class="h"><span class="s"></span>3 · Konsumsi Produksi</div>
+          <div class="doc">mvt 261 / backflush</div>
+          <div class="meta">Saldo PIB berkurang FIFO dari pemakaian bahan baku.</div>
+        </div>
+        <div class="arrow"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12h15m-6-6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="step">
+          <div class="h"><span class="s"></span>4 · Ekspor (PEB)</div>
+          <div class="doc">PEB / BCL.KT01</div>
+          <div class="meta">Realisasi ekspor tutup kewajiban PIB terkait.</div>
+        </div>
+      </div>
+      <div class="splitnote">
+        <div class="vchip k"><div class="t">Valuasi KITE</div><b>Z-KITE</b> — nilai <b>tanpa</b> BM &amp; PDRI (dibebaskan)</div>
+        <div class="vchip"><div class="t">Valuasi impor normal</div><b>Z-IMPOR</b> — termasuk landed duty · selisihnya = exposure</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="tablecard">
+    <div class="tc-head">
+      <h2>Daftar PIB Belum Tuntas Diekspor<span class="cnt" id="cnt">0</span></h2>
+      <div class="tools">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.2-3.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="q" type="search" placeholder="Cari PIB / PO / material" aria-label="Cari PIB, PO, atau material">
+        </label>
+        <div class="filters" role="group" aria-label="Filter status">
+          <button class="chip" data-f="all" aria-pressed="true">Semua</button>
+          <button class="chip" data-f="ok" aria-pressed="false">Aman</button>
+          <button class="chip" data-f="warn" aria-pressed="false">≤30 hari</button>
+          <button class="chip danger" data-f="alert" aria-pressed="false">Lewat JT</button>
+        </div>
+        <button class="btn-ghost" type="button" id="csv">Ekspor CSV ↓</button>
+      </div>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>No. PIB / Tgl</th><th>PO SAP</th><th>Material</th>
+            <th class="r">Impor</th><th class="r">Outstanding</th><th class="r m">Nilai KITE (jt)</th>
+            <th>Realisasi</th><th>Jatuh tempo</th><th>Sisa</th><th>GR</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <b>Catatan:</b> angka pada prototipe ini <b>data contoh</b> berbentuk respons OData. Logika: <span class="mono">sisa hari = DUE_DATE − hari ini</span>; status <b>Lewat JT</b> memunculkan estimasi <b>BM + PDRI terutang = NILAI_NORMAL − NILAI_KITE</b> atas qty outstanding. Saldo PIB berkurang FIFO dari konsumsi produksi dan tertutup realisasi PEB.
+    Go-live: isi <code style="font-family:'IBM Plex Mono'">ODATA_URL</code> ke CDS <span class="mono">ZC_KITE_OUTSTANDING</span>; nama field di data contoh sudah mengikuti struktur CDS, jadi tidak perlu ubah kode render. Singkatan: BM = Bea Masuk, PDRI = Pajak Dalam Rangka Impor, GR = Goods Receipt, JT = jatuh tempo.
+  </footer>
+</div>
+
+<div class="modal-bg" id="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+  <div class="modal">
+    <div class="m-head">
+      <button class="m-close" id="mClose" type="button" aria-label="Tutup">✕</button>
+      <div class="ttl" id="mTitle"></div>
+      <div class="mat" id="mMat"></div>
+    </div>
+    <div class="m-body" id="mBody"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* =================================================================
+     KONFIGURASI SUMBER DATA
+     Untuk go-live, isi URL OData V4 dari CDS ZC_KITE_OUTSTANDING, mis:
+     var ODATA_URL = "/sap/opu/odata4/sap/zui_kite_o4/srvd/sap/zkite/0001/Outstanding";
+     Selama kosong (""), dashboard memakai data contoh di bawah.
+  ================================================================= */
+  var ODATA_URL = "";
+  var AS_OF = "2026-06-30"; // tanggal acuan demo; versi live pakai tanggal hari ini
+
+  // Data contoh dalam bentuk respons OData V4: { value: [ ...entitas CDS... ] }
+  var MOCK = { value: [
+    {PIB_NO:"000123",PIB_DATE:"2025-08-12",DUE_DATE:"2026-08-12",EBELN:"4500012345",EBELP:"00010",MATNR:"RM-POLY-150",MAKTX:"Kain Polyester",BWTAR:"Z-KITE",MEINS:"M",QTY_IMP:50000,QTY_CONS:42000,QTY_EXP:38000,QTY_OUT:12000,NILAI_KITE:840,NILAI_NORMAL:1058,GR_STATUS:"C"},
+    {PIB_NO:"000156",PIB_DATE:"2025-07-02",DUE_DATE:"2026-07-02",EBELN:"4500012410",EBELP:"00010",MATNR:"RM-YARN-30",MAKTX:"Benang Katun 30s",BWTAR:"Z-KITE",MEINS:"KG",QTY_IMP:30000,QTY_CONS:28500,QTY_EXP:27500,QTY_OUT:2500,NILAI_KITE:195,NILAI_NORMAL:246,GR_STATUS:"C"},
+    {PIB_NO:"000087",PIB_DATE:"2025-05-20",DUE_DATE:"2026-05-20",EBELN:"4500012090",EBELP:"00020",MATNR:"RM-SOLE-RB",MAKTX:"Sol Karet",BWTAR:"Z-KITE",MEINS:"PSG",QTY_IMP:40000,QTY_CONS:33000,QTY_EXP:31000,QTY_OUT:9000,NILAI_KITE:540,NILAI_NORMAL:680,GR_STATUS:"C"},
+    {PIB_NO:"000175",PIB_DATE:"2025-09-01",DUE_DATE:"2026-09-01",EBELN:"4500012501",EBELP:"00010",MATNR:"RM-RESIN-PP",MAKTX:"Resin Plastik PP",BWTAR:"Z-KITE",MEINS:"KG",QTY_IMP:25000,QTY_CONS:16000,QTY_EXP:12000,QTY_OUT:13000,NILAI_KITE:910,NILAI_NORMAL:1147,GR_STATUS:"C"},
+    {PIB_NO:"000201",PIB_DATE:"2025-10-15",DUE_DATE:"2026-10-15",EBELN:"4500012640",EBELP:"00030",MATNR:"RM-PCB-A1",MAKTX:"Komponen Elektronik",BWTAR:"Z-KITE",MEINS:"PCS",QTY_IMP:100000,QTY_CONS:55000,QTY_EXP:40000,QTY_OUT:60000,NILAI_KITE:2150,NILAI_NORMAL:2709,GR_STATUS:"C"},
+    {PIB_NO:"000142",PIB_DATE:"2025-06-28",DUE_DATE:"2026-06-28",EBELN:"4500012360",EBELP:"00010",MATNR:"RM-MTL-ZIP",MAKTX:"Aksesoris Logam",BWTAR:"Z-KITE",MEINS:"PCS",QTY_IMP:60000,QTY_CONS:56000,QTY_EXP:55000,QTY_OUT:5000,NILAI_KITE:120,NILAI_NORMAL:151,GR_STATUS:"C"},
+    {PIB_NO:"000160",PIB_DATE:"2025-07-18",DUE_DATE:"2026-07-18",EBELN:"4500012455",EBELP:"00010",MATNR:"RM-DENIM-12",MAKTX:"Kain Denim 12oz",BWTAR:"Z-KITE",MEINS:"M",QTY_IMP:35000,QTY_CONS:24000,QTY_EXP:20000,QTY_OUT:15000,NILAI_KITE:1050,NILAI_NORMAL:1323,GR_STATUS:"C"},
+    {PIB_NO:"000188",PIB_DATE:"2025-08-30",DUE_DATE:"2026-08-30",EBELN:"4500012560",EBELP:"00040",MATNR:"RM-EVA-FM",MAKTX:"Busa EVA",BWTAR:"Z-KITE",MEINS:"KG",QTY_IMP:22000,QTY_CONS:8000,QTY_EXP:5000,QTY_OUT:17000,NILAI_KITE:680,NILAI_NORMAL:857,GR_STATUS:"P"}
+  ]};
+
+  /* ---------- util ---------- */
+  var BULAN=["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"];
+  function parse(d){var p=d.split("-");return new Date(+p[0],+p[1]-1,+p[2]);}
+  function fmtTgl(d){var x=parse(d);return ("0"+x.getDate()).slice(-2)+" "+BULAN[x.getMonth()]+" "+x.getFullYear();}
+  function daysBetween(a,b){return Math.round((parse(a)-parse(b))/86400000);}
+  var nf=function(n){return Math.round(n).toLocaleString("id-ID");};
+  function miliar(jt){return (jt/1000).toLocaleString("id-ID",{minimumFractionDigits:2,maximumFractionDigits:2});}
+  function statusOf(s){return s<=0?"alert":(s<=30?"warn":"ok");}
+  function statusLabel(k){return k==="alert"?"Lewat JT":k==="warn"?"Mendekati JT":"Aman";}
+
+  var DATA=[]; // diperkaya: + sisa, status
+  function enrich(rows){
+    return rows.filter(function(r){return r.QTY_OUT>0;}).map(function(r){
+      var sisa=daysBetween(r.DUE_DATE,AS_OF);
+      var st=statusOf(sisa);
+      return Object.assign({},r,{sisa:sisa,st:st,realiz:Math.round((r.QTY_IMP-r.QTY_OUT)/r.QTY_IMP*100)});
+    });
+  }
+
+  /* ---------- KPI ---------- */
+  function renderKPI(){
+    var aktif=DATA.length;
+    var outNil=DATA.reduce(function(s,r){return s+r.NILAI_KITE;},0);
+    var w30=DATA.filter(function(r){return r.st==="warn";}).length;
+    var over=DATA.filter(function(r){return r.st==="alert";});
+    var exposure=over.reduce(function(s,r){return s+(r.NILAI_NORMAL-r.NILAI_KITE);},0);
+    var realiz=Math.round(DATA.reduce(function(s,r){return s+r.realiz;},0)/(aktif||1));
+    var k=document.getElementById("kpis");
+    k.innerHTML=
+      kpi("","PIB aktif (belum tuntas ekspor)",aktif,"","dari data outstanding",null)+
+      kpi("gold","Nilai bahan baku belum diekspor","Rp "+miliar(outNil),"M","valuasi KITE (tanpa BM/PDRI)",null)+
+      kpi("warn","Mendekati jatuh tempo (≤30 hari)",w30,"",w30?"perlu percepatan ekspor":"aman",w30?"mid":null)+
+      kpi("alert","Lewat jatuh tempo",over.length,"",over.length?"wajib pelunasan BM + PDRI":"tidak ada",over.length?"bad":null)+
+      kpi("alert","Estimasi BM &amp; PDRI terutang","Rp "+miliar(exposure),"M","exposure atas PIB overdue",exposure?"bad":null)+
+      kpiMeter("Rata-rata realisasi konversi",realiz);
+  }
+  function kpi(cls,label,val,unit,note,noteCls){
+    return '<div class="kpi'+(cls?" "+cls:"")+'"><div class="label">'+label+'</div>'+
+      '<div class="val mono">'+val+(unit?' <small>'+unit+'</small>':'')+'</div>'+
+      '<div class="note'+(noteCls?" "+noteCls:"")+'">'+note+'</div></div>';
+  }
+  function kpiMeter(label,pct){
+    return '<div class="kpi"><div class="label">'+label+'</div><div class="val mono">'+pct+'<small>%</small></div>'+
+      '<div class="meter"><i style="width:'+pct+'%"></i></div></div>';
+  }
+
+  /* ---------- aging ---------- */
+  function renderAging(){
+    var b={alert:0,w30:0,d90:0,d90p:0};
+    DATA.forEach(function(r){
+      if(r.sisa<=0)b.alert+=r.NILAI_KITE;
+      else if(r.sisa<=30)b.w30+=r.NILAI_KITE;
+      else if(r.sisa<=90)b.d90+=r.NILAI_KITE;
+      else b.d90p+=r.NILAI_KITE;
+    });
+    var rows=[["Lewat JT","var(--alert)",b.alert],["≤ 30 hari","var(--warn)",b.w30],
+      ["31–90 hari","var(--info)",b.d90],["> 90 hari","var(--ok)",b.d90p]];
+    var max=Math.max(1,Math.max.apply(null,rows.map(function(d){return d[2];})));
+    document.getElementById("aging").innerHTML=rows.map(function(d){
+      return '<div class="agerow"><div class="nm"><span class="d" style="background:'+d[1]+'"></span>'+d[0]+'</div>'+
+        '<div class="track"><i style="width:'+(d[2]/max*100).toFixed(1)+'%;background:'+d[1]+'"></i></div>'+
+        '<div class="v">'+nf(d[2])+'</div></div>';
+    }).join("");
+  }
+
+  /* ---------- table ---------- */
+  var curFilter="all", curQuery="";
+  function visible(){
+    return DATA.filter(function(r){
+      if(curFilter!=="all" && r.st!==curFilter) return false;
+      if(curQuery){
+        var hay=(r.PIB_NO+" "+r.EBELN+" "+r.MAKTX+" "+r.MATNR).toLowerCase();
+        if(hay.indexOf(curQuery)<0) return false;
+      }
+      return true;
+    });
+  }
+  function renderTable(){
+    var rows=visible(), tb=document.getElementById("tbody");
+    document.getElementById("cnt").textContent=rows.length;
+    if(!rows.length){tb.innerHTML='<tr><td colspan="11" class="empty">Tidak ada PIB yang cocok dengan filter.</td></tr>';return;}
+    tb.innerHTML=rows.map(function(r){
+      var col=r.st==="alert"?"var(--alert)":r.st==="warn"?"var(--warn)":"var(--ok)";
+      var sisaTxt=r.sisa<=0?(r.sisa+" hari"):("+"+r.sisa+" hari");
+      var grPart=r.GR_STATUS!=="C";
+      return '<tr class="rowlink" tabindex="0" data-pib="'+r.PIB_NO+'" aria-label="Buka detail PIB '+r.PIB_NO+'">'+
+        '<td><span class="pib"><span class="open">›</span>'+r.PIB_NO+'</span><br><span class="mono" style="font-size:.72rem;color:var(--muted)">'+fmtTgl(r.PIB_DATE)+'</span></td>'+
+        '<td class="m" style="color:var(--info)">'+r.EBELN+'<span style="color:var(--muted)">/'+r.EBELP+'</span></td>'+
+        '<td><div class="matn">'+r.MAKTX+'<small>'+r.MATNR+'</small></div></td>'+
+        '<td class="r m">'+nf(r.QTY_IMP)+' <span style="color:var(--muted)">'+r.MEINS.toLowerCase()+'</span></td>'+
+        '<td class="r m" style="font-weight:600">'+nf(r.QTY_OUT)+' <span style="color:var(--muted)">'+r.MEINS.toLowerCase()+'</span></td>'+
+        '<td class="r m">'+nf(r.NILAI_KITE)+'</td>'+
+        '<td><span class="prog"><span class="pb"><i style="width:'+r.realiz+'%"></i></span><span class="mono" style="font-size:.74rem">'+r.realiz+'%</span></span></td>'+
+        '<td class="m">'+fmtTgl(r.DUE_DATE)+'</td>'+
+        '<td><span class="cd" style="color:'+col+'">'+sisaTxt+'</span></td>'+
+        '<td><span class="gr'+(grPart?" part":"")+'">'+(grPart?"Parsial":"Selesai")+'</span></td>'+
+        '<td><span class="pill '+r.st+'">'+statusLabel(r.st)+'</span></td>'+
+        '</tr>';
+    }).join("");
+  }
+
+  /* ---------- CSV ---------- */
+  function exportCSV(){
+    var rows=visible();
+    var head=["PIB","Tgl PIB","PO","Item","Material","Deskripsi","Satuan","Qty Impor","Qty Outstanding","Nilai KITE (jt)","Nilai Normal (jt)","Jatuh Tempo","Sisa Hari","Status"];
+    var lines=[head.join(";")];
+    rows.forEach(function(r){
+      lines.push([r.PIB_NO,r.PIB_DATE,r.EBELN,r.EBELP,r.MATNR,r.MAKTX,r.MEINS,r.QTY_IMP,r.QTY_OUT,r.NILAI_KITE,r.NILAI_NORMAL,r.DUE_DATE,r.sisa,statusLabel(r.st)].join(";"));
+    });
+    var blob=new Blob(["\ufeff"+lines.join("\n")],{type:"text/csv;charset=utf-8;"});
+    var a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download="kite_pib_outstanding_"+AS_OF+".csv";a.click();URL.revokeObjectURL(a.href);
+  }
+
+  /* ---------- load ---------- */
+  function renderAll(){renderKPI();renderAging();renderTable();}
+  function setSource(live,msg){
+    document.getElementById("srcTag").textContent=live?"● Terhubung OData":"● Mode demo";
+    document.getElementById("srcTag").style.color=live?"var(--ok)":"var(--warn)";
+    if(msg)document.getElementById("srcMsg").innerHTML=msg;
+  }
+  async function load(){
+    try{
+      var raw;
+      if(ODATA_URL){
+        var res=await fetch(ODATA_URL,{headers:{Accept:"application/json"}});
+        if(!res.ok)throw new Error("HTTP "+res.status);
+        var json=await res.json();
+        raw=json.value||json.d&&json.d.results||[];
+        setSource(true,"Terhubung ke <code>"+ODATA_URL+"</code> — menampilkan data SAP langsung.");
+      }else{
+        raw=MOCK.value;
+      }
+      DATA=enrich(raw);
+      renderAll();
+    }catch(e){
+      DATA=enrich(MOCK.value);renderAll();
+      setSource(false,"Gagal membaca OData ("+e.message+"). Sementara memakai data contoh — periksa URL/otorisasi.");
+    }
+  }
+
+  /* ---------- detail modal ---------- */
+  var modal=document.getElementById("modal"), lastFocus=null;
+  function openDetail(pib){
+    var r=DATA.filter(function(x){return x.PIB_NO===pib;})[0];
+    if(!r)return;
+    var u=r.MEINS.toLowerCase();
+    var selisih=r.NILAI_NORMAL-r.NILAI_KITE;
+    var expProp=Math.round(selisih*(r.QTY_OUT/r.QTY_IMP)); // exposure atas qty outstanding
+    var sisaTxt=r.sisa<=0?(Math.abs(r.sisa)+" hari yang lalu"):("sisa "+r.sisa+" hari");
+    var bannerTxt=r.st==="alert"
+        ? "Lewat jatuh tempo "+sisaTxt+" — wajib pelunasan BM + PDRI"
+        : r.st==="warn"
+        ? "Mendekati jatuh tempo — "+sisaTxt+", percepat realisasi ekspor"
+        : "Dalam tenggat — "+sisaTxt;
+    var expPct=Math.round(r.QTY_EXP/r.QTY_IMP*100);
+    var outPct=Math.round(r.QTY_OUT/r.QTY_IMP*100);
+
+    document.getElementById("mTitle").innerHTML='PIB '+r.PIB_NO+' <span class="pill '+r.st+'" style="font-family:\'Plus Jakarta Sans\'">'+statusLabel(r.st)+'</span>';
+    document.getElementById("mMat").textContent=r.MAKTX+" · "+r.MATNR;
+
+    var html=
+      '<div class="m-banner '+r.st+'">'+bannerTxt+'</div>'+
+      '<div class="facts">'+
+        fact("No. PIB / Tgl daftar",r.PIB_NO+" · "+fmtTgl(r.PIB_DATE),true)+
+        fact("Jatuh tempo (PIB + 12 bln)",fmtTgl(r.DUE_DATE),true)+
+        fact("PO / Item SAP",r.EBELN+" / "+r.EBELP,true)+
+        fact("Material",r.MATNR+" — "+r.MAKTX,false)+
+        fact("Tipe valuasi",r.BWTAR+" (KITE)",true)+
+        fact("Status GR",r.GR_STATUS==="C"?"Selesai":"Parsial",false)+
+      '</div>'+
+      '<div class="m-sec">Konversi kuantitas ('+u+')</div>'+
+      '<div class="flow4">'+
+        cell("Impor",nf(r.QTY_IMP),false)+
+        cell("Dikonsumsi",nf(r.QTY_CONS),false)+
+        cell("Diekspor",nf(r.QTY_EXP),false)+
+        cell("Outstanding",nf(r.QTY_OUT),true)+
+      '</div>'+
+      '<div class="bigbar"><i class="exp" style="width:'+expPct+'%"></i><i class="out" style="width:'+outPct+'%"></i></div>'+
+      '<div class="barleg"><span><span class="sw" style="background:var(--ok)"></span>Sudah diekspor '+expPct+'%</span>'+
+        '<span><span class="sw" style="background:var(--gold)"></span>Belum diekspor '+outPct+'%</span></div>'+
+      '<div class="m-sec">Valuasi &amp; potensi pungutan (Rp juta)</div>'+
+      '<div class="valbox">'+
+        vcell("Nilai KITE (outstanding)",nf(r.NILAI_KITE),false)+
+        vcell("Nilai impor normal",nf(r.NILAI_NORMAL),false)+
+        vcell("Selisih (BM + PDRI)",nf(selisih),r.st==="alert")+
+      '</div>'+
+      (r.st==="alert"
+        ? '<div class="callout">PIB ini <b>lewat jatuh tempo</b>. Estimasi <b>BM + PDRI terutang</b> atas '+nf(r.QTY_OUT)+' '+u+' outstanding ≈ <b>Rp '+nf(expProp)+' juta</b>. Tindak lanjut: percepat ekspor/PEB, ajukan perpanjangan, atau lakukan pelunasan.</div>'
+        : '');
+    document.getElementById("mBody").innerHTML=html;
+
+    lastFocus=document.activeElement;
+    modal.classList.add("open");
+    document.getElementById("mClose").focus();
+  }
+  function fact(k,v,mono){return '<div class="fact"><div class="k">'+k+'</div><div class="v'+(mono?" m":"")+'">'+v+'</div></div>';}
+  function cell(l,n,out){return '<div class="c'+(out?" out":"")+'"><div class="n">'+n+'</div><div class="l">'+l+'</div></div>';}
+  function vcell(k,v,exp){return '<div class="vcell'+(exp?" exp":"")+'"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>';}
+  function closeModal(){modal.classList.remove("open");if(lastFocus)lastFocus.focus();}
+
+  document.getElementById("tbody").addEventListener("click",function(e){
+    var tr=e.target.closest("tr.rowlink");if(tr)openDetail(tr.getAttribute("data-pib"));
+  });
+  document.getElementById("tbody").addEventListener("keydown",function(e){
+    if(e.key!=="Enter")return;var tr=e.target.closest("tr.rowlink");if(tr){e.preventDefault();openDetail(tr.getAttribute("data-pib"));}
+  });
+  document.getElementById("mClose").addEventListener("click",closeModal);
+  modal.addEventListener("click",function(e){if(e.target===modal)closeModal();});
+  document.addEventListener("keydown",function(e){if(e.key==="Escape"&&modal.classList.contains("open"))closeModal();});
+
+  /* ---------- events ---------- */
+  document.querySelectorAll(".chip").forEach(function(c){
+    c.addEventListener("click",function(){
+      document.querySelectorAll(".chip").forEach(function(x){x.setAttribute("aria-pressed","false");});
+      c.setAttribute("aria-pressed","true");curFilter=c.getAttribute("data-f");renderTable();
+    });
+  });
+  document.getElementById("q").addEventListener("input",function(e){curQuery=e.target.value.trim().toLowerCase();renderTable();});
+  document.getElementById("csv").addEventListener("click",exportCSV);
+  document.getElementById("reload").addEventListener("click",function(){
+    document.getElementById("grSync").textContent=new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})+" WIB";
+    load();
+  });
+  document.getElementById("asof").textContent=fmtTgl(AS_OF);
+
+  load();
+})();
+</script>
+</body>
+</html>

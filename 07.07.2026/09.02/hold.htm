@@ -1,0 +1,603 @@
+<%@page language="abap"%>
+<%
+  "========== DATA DECLARATIONS & TYPES =========="
+  TYPES: BEGIN OF ty_hold_dashboard,
+           belnr    TYPE rbkp-belnr,
+           gjahr    TYPE rbkp-gjahr,
+           bldat    TYPE rbkp-bldat,
+           xblnr    TYPE rbkp-xblnr,
+           lifnr    TYPE rbkp-lifnr,
+           name1    TYPE lfa1-name1,
+           rmwwr    TYPE rbkp-rmwwr,
+           waers    TYPE rbkp-waers,
+         END OF ty_hold_dashboard.
+
+  TYPES: BEGIN OF ty_doc_payload,
+           type    TYPE string,
+           name    TYPE string,
+           mime    TYPE string,
+           content TYPE string,
+         END OF ty_doc_payload.
+  DATA: lt_docs_payload TYPE STANDARD TABLE OF ty_doc_payload WITH EMPTY KEY.
+
+  "========== VARIABLES =========="
+  DATA: gv_active_page   TYPE string,
+        lv_action        TYPE string,
+        lt_raw_logs      TYPE STANDARD TABLE OF zapp_log,
+        lt_dashboard     TYPE STANDARD TABLE OF ty_hold_dashboard,
+        ls_dash          TYPE ty_hold_dashboard,
+        lv_json_response TYPE string.
+
+  lv_action = request->get_form_field( 'action' ).
+
+  "======================================================================"
+  " BACKEND HANDLER 1: LIST HOLD INVOICES (FLAG = 2)
+  "======================================================================"
+  IF lv_action = 'list_hold'.
+    SELECT * FROM zapp_log
+      WHERE uname = @sy-uname
+        AND flag  = 2
+      INTO TABLE @lt_raw_logs.
+
+    SORT lt_raw_logs BY belnr ASCENDING datum DESCENDING uzeit DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_raw_logs COMPARING belnr.
+
+    LOOP AT lt_raw_logs ASSIGNING FIELD-SYMBOL(<ls_hold>).
+      CLEAR ls_dash.
+      SELECT SINGLE r~belnr, r~gjahr, r~bldat, r~xblnr, r~lifnr, r~rmwwr, r~waers, l~name1
+        FROM rbkp AS r
+        LEFT OUTER JOIN lfa1 AS l ON l~lifnr = r~lifnr
+        WHERE r~belnr  = @<ls_hold>-belnr
+          AND r~gjahr  = @<ls_hold>-gjahr
+          AND r~rbstat IN ( 'A', 'B' )
+        INTO CORRESPONDING FIELDS OF @ls_dash.
+
+      IF sy-subrc = 0.
+        APPEND ls_dash TO lt_dashboard.
+      ENDIF.
+    ENDLOOP.
+
+    " Generate JSON Response
+    DATA: lv_sep_hold TYPE string VALUE ''.
+    lv_json_response = '{"status":"success","data":['.
+    LOOP AT lt_dashboard INTO ls_dash.
+      DATA: lv_amt_str   TYPE string,
+            lv_date_str  TYPE string,
+            lv_belnr_str TYPE string.
+
+      " FIX: Mengonversi nilai nominal internal database SAP sesuai referensi mata uang WAERS (IDR)
+      lv_amt_str   = |{ ls_dash-rmwwr CURRENCY = ls_dash-waers NUMBER = RAW }|.
+      CONDENSE lv_amt_str.
+
+      lv_belnr_str = |{ ls_dash-belnr }|. CONDENSE lv_belnr_str.
+      lv_date_str  = |{ ls_dash-bldat+6(2) }.{ ls_dash-bldat+4(2) }.{ ls_dash-bldat+0(4) }|.
+
+      lv_json_response = lv_json_response && lv_sep_hold && '{'
+                    && '"belnr":"'   && lv_belnr_str && '"'
+                    && ',"gjahr":"'  && |{ ls_dash-gjahr }| && '"'
+                    && ',"xblnr":"'  && |{ ls_dash-xblnr }| && '"'
+                    && ',"lifnr":"'  && |{ ls_dash-lifnr }| && '"'
+                    && ',"name1":"'  && |{ ls_dash-name1 }| && '"'
+                    && ',"amount":"' && lv_amt_str && '"'
+                    && ',"waers":"'  && |{ ls_dash-waers }| && '"'
+                    && ',"date":"'   && lv_date_str && '"'
+                    && '}'.
+      lv_sep_hold = ','.
+    ENDLOOP.
+    lv_json_response = lv_json_response && ']}'.
+
+    response->set_cdata( lv_json_response ).
+    response->set_header_field( name = 'Content-Type' value = 'application/json' ).
+    RETURN.
+  ENDIF.
+
+  "======================================================================"
+  " BACKEND HANDLER 2: MULTI-UPLOAD & UPDATE STATUS LOG TO PARK
+  "======================================================================"
+  IF lv_action = 'upload_hold_docs'.
+    DATA: lv_ref_invoice TYPE belnr_d,
+          lv_docs_json   TYPE string,
+          lv_xstring     TYPE xstring,
+          lv_uuid        TYPE sysuuid_c32,
+          ls_attach      TYPE zapp_attachment,
+          lt_attach      TYPE TABLE OF zapp_attachment.
+
+    lv_ref_invoice = request->get_form_field( 'ref_doc' ).
+    lv_docs_json   = request->get_form_field( 'docs_json' ).
+
+    IF lv_docs_json IS INITIAL OR lv_ref_invoice IS INITIAL.
+      response->set_cdata( '{"status":"error","message":"Data payload kosong."}' ).
+      response->set_header_field( name = 'Content-Type' value = 'application/json' ).
+      RETURN.
+    ENDIF.
+
+    /ui2/cl_json=>deserialize( EXPORTING json = lv_docs_json CHANGING data = lt_docs_payload ).
+
+    LOOP AT lt_docs_payload ASSIGNING FIELD-SYMBOL(<ls_doc>).
+      CLEAR: ls_attach, lv_xstring.
+      TRY.
+          lv_uuid = cl_system_uuid=>create_uuid_c32_static( ).
+        CATCH cx_uuid_error.
+      ENDTRY.
+
+      DATA(lv_clean_content) = <ls_doc>-content.
+      DATA(lv_comma_pos)     = 0.
+      FIND ',' IN lv_clean_content MATCH OFFSET lv_comma_pos.
+      IF sy-subrc = 0.
+        lv_comma_pos     = lv_comma_pos + 1.
+        lv_clean_content = lv_clean_content+lv_comma_pos.
+      ENDIF.
+
+      CALL FUNCTION 'SSFC_BASE64_DECODE'
+        EXPORTING  b64data = lv_clean_content
+        IMPORTING  bindata = lv_xstring
+        EXCEPTIONS OTHERS  = 1.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      ls_attach-mandt        = sy-mandt.
+      ls_attach-attach_id    = lv_uuid.
+      ls_attach-ref_doc      = lv_ref_invoice.
+      ls_attach-doc_type     = <ls_doc>-type.
+      ls_attach-file_name    = <ls_doc>-name.
+      ls_attach-file_type    = <ls_doc>-mime.
+      ls_attach-file_content = lv_xstring.
+      ls_attach-upload_by    = sy-uname.
+      ls_attach-upload_date  = sy-datum.
+      APPEND ls_attach TO lt_attach.
+    ENDLOOP.
+
+    IF lt_attach IS NOT INITIAL.
+      LOOP AT lt_attach ASSIGNING FIELD-SYMBOL(<ls_del_key>).
+        DELETE FROM zapp_attachment
+          WHERE ref_doc  = @<ls_del_key>-ref_doc
+            AND doc_type = @<ls_del_key>-doc_type.
+      ENDLOOP.
+      INSERT zapp_attachment FROM TABLE lt_attach.
+    ENDIF.
+
+    " Update Tabel ZAPP_LOG (INT1 / FLAG = 10, CHAR30 / BAL_STATUS = 'PARK')
+    UPDATE zapp_log
+       SET flag       = 10,
+           bal_status = 'PARK'
+     WHERE belnr      = @lv_ref_invoice
+       AND flag       = 2.
+
+    IF sy-subrc = 0.
+      COMMIT WORK AND WAIT.
+      response->set_cdata( '{"status":"success","message":"Data lampiran berhasil disimpan dan status log diperbarui ke PARK."}' ).
+    ELSE.
+      ROLLBACK WORK.
+      response->set_cdata( '{"status":"error","message":"Gagal memperbarui status dokumen pada tabel ZAPP_LOG."}' ).
+    ENDIF.
+
+    response->set_header_field( name = 'Content-Type' value = 'application/json' ).
+    RETURN.
+  ENDIF.
+
+  "========== SIDEBAR VARIABLES (Layout Only) =========="
+  DATA: lv_role TYPE string.
+  lv_role = request->get_form_field( 'role' ).
+  gv_active_page = 'HOLD'.
+%>
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AP Invoice - Dashboard HOLD</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght=400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 100; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    .modal-overlay.open { display: flex; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; font-size: 13px; font-weight: 600; border-radius: 8px; cursor: pointer; transition: all 0.15s ease; }
+    .btn-primary { background: #059669; color: #ffffff; }
+    .btn-primary:hover { background: #047857; }
+    .btn-secondary { background: #ffffff; color: #475569; border: 1px solid #e2e8f0; }
+    .btn-secondary:hover { background: #f1f5f9; }
+  </style>
+</head>
+<body>
+
+<div class="flex flex-col md:flex-row h-screen overflow-hidden">
+  <%@include file="sidebar.htm" %>
+
+  <main class="flex-1 overflow-y-auto p-4 md:p-8 bg-[#f8fafc]">
+
+    <div class="mb-6 md:mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 md:p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+      <div>
+        <h1 class="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">HOLDING DOCUMENT (Staging Zone)</h1>
+      </div>
+      <button onclick="loadHoldDashboard()" class="w-full sm:w-auto justify-center btn btn-secondary text-sm shadow-sm border border-slate-200 hover:bg-slate-50 font-semibold text-slate-700">
+        <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.25 15.657l-.94-.313m0 0a6 6 0
+10-11.832-4.144l.314-.942"/></svg>
+        Refresh Data
+      </button>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+      <div class="p-4 md:p-5 bg-slate-50/60 border-b border-slate-200 flex justify-between items-center">
+        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Antrean Dokumen</span>
+        <span id="txtDocCounter" class="bg-amber-50 text-amber-800 text-xs font-semibold px-3 py-1 rounded-full border border-amber-200/60">0 Invoice</span>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse text-sm min-w-[600px]">
+          <thead class="bg-slate-50/80 text-slate-500 font-semibold uppercase tracking-wider text-xs border-b border-slate-200">
+            <tr>
+              <th class="p-4 pl-6">No. Invoice SAP</th>
+              <th class="p-4">Tanggal Invoice</th>
+              <th class="p-4">No. Referensi Vendor</th>
+              <th class="p-4">Vendor</th>
+              <th class="p-4 text-right">Amount</th>
+              <th class="p-4 text-center pr-6">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="holdTableBody" class="divide-y divide-slate-100 text-slate-700 bg-white"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="holdUploadModal">
+  <div class="bg-white w-[92%] max-w-[500px] rounded-xl border border-slate-200 overflow-hidden shadow-2xl flex flex-col">
+
+    <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+      <div>
+        <h3 class="text-base font-bold text-slate-900">Kelengkapan Berkas MIRO</h3>
+        <p class="text-xs text-slate-500 mt-0.5" id="lblModalInvoiceRef">Ref SAP: -</p>
+      </div>
+      <button onclick="closeHoldUploadModal()" class="text-slate-400 hover:text-slate-600 transition-colors p-1 rounded-lg hover:bg-slate-200/60">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div id="modal_form_body" class="p-6 space-y-5">
+
+      <div class="space-y-1.5">
+        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-600">Berkas Lampiran Invoice</label>
+        <div class="border border-slate-200 bg-slate-50/50 p-3 rounded-lg flex justify-between items-center shadow-2xs transition-all hover:border-slate-300">
+          <span class="text-slate-600 text-sm font-normal truncate pr-4" id="status_label_INV">Pilih berkas atau ambil foto...</span>
+          <div class="flex items-center gap-2 text-slate-500 flex-shrink-0">
+            <button onclick="startWebcamStream('INV')" class="p-2 hover:text-emerald-600 hover:bg-emerald-50 rounded-md transition-all border border-slate-200 bg-white shadow-3xs" title="Ambil Foto Kamera">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507
+2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736
+1.039l-.821 1.316z"/><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/></svg>
+            </button>
+            <button onclick="triggerFileSelect('INV')" class="p-2 hover:text-emerald-600 hover:bg-emerald-50 rounded-md transition-all border border-slate-200 bg-white shadow-3xs" title="Pilih Berkas Dokumen">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="file_list_INV" class="space-y-1.5 px-0.5"></div>
+      </div>
+
+      <div class="space-y-1.5">
+        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-600">Berkas Faktur Pajak</label>
+        <div class="border border-slate-200 bg-slate-50/50 p-3 rounded-lg flex justify-between items-center shadow-2xs transition-all hover:border-slate-300">
+          <span class="text-slate-600 text-sm font-normal truncate pr-4" id="status_label_TAX">Pilih berkas atau ambil foto...</span>
+          <div class="flex items-center gap-2 text-slate-500 flex-shrink-0">
+            <button onclick="startWebcamStream('TAX')" class="p-2 hover:text-emerald-600 hover:bg-emerald-50 rounded-md transition-all border border-slate-200 bg-white shadow-3xs" title="Ambil Foto Kamera">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507
+2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736
+1.039l-.821 1.316z"/><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/></svg>
+            </button>
+            <button onclick="triggerFileSelect('TAX')" class="p-2 hover:text-emerald-600 hover:bg-emerald-50 rounded-md transition-all border border-slate-200 bg-white shadow-3xs" title="Pilih Berkas Dokumen">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="file_list_TAX" class="space-y-1.5 px-0.5"></div>
+      </div>
+
+    </div>
+
+    <div id="webcam_capture_body" class="hidden p-6 flex flex-col items-center space-y-4 bg-slate-900">
+      <div class="relative w-full aspect-video bg-black rounded-lg overflow-hidden border border-slate-700">
+        <video id="webcam_video" autoplay playsinline class="w-full h-full object-cover"></video>
+      </div>
+      <div class="flex gap-2.5 w-full">
+        <button onclick="stopWebcamStream()" class="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-semibold rounded-lg text-slate-300 border border-slate-700 transition-all">
+          Kembali / Batal
+        </button>
+        <button onclick="captureWebcamSnapshot()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-xs font-semibold rounded-lg text-white shadow-md transition-all">
+          📸 Ambil Potret Gambar
+        </button>
+      </div>
+    </div>
+
+    <input type="file" id="hid_input_INV" class="hidden" accept=".pdf,.jpg,.jpeg,.png" multiple onchange="onFilePicked('INV')">
+    <input type="file" id="hid_input_TAX" class="hidden" accept=".pdf,.jpg,.jpeg,.png" multiple onchange="onFilePicked('TAX')">
+    <canvas id="hidden_canvas" class="hidden"></canvas>
+
+    <div id="modal_footer_actions" class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end items-center gap-2.5">
+      <button onclick="closeHoldUploadModal()" class="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-200/50 rounded-lg transition-all">
+        Batal
+      </button>
+      <button class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-all active:scale-98 disabled:opacity-50 disabled:pointer-events-none"
+              id="btnSubmitTax" onclick="executeHoldUpload()">
+        Simpan & Park (MIRO)
+      </button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
+
+<script>
+  let gActiveBeln = '';
+  let gActiveGjahr = '';
+  let gHoldFiles = { INV: [], TAX: [] };
+  let gActiveCamTarget = '';
+  let gLocalStream = null;
+
+  function getCookie(name) {
+    let cookies = document.cookie.split(';');
+    for (let i = 0; i < cookies.length; i++) {
+      let c = cookies[i].trim();
+      if (c.indexOf(name + '=') === 0) return c.substring(name.length + 1);
+    }
+    return '';
+  }
+
+  function getCsrfToken() {
+    let token = getCookie('~csrf_token');
+    if (!token) token = getCookie('sap-xsrf-token');
+    if (!token) token = getCookie('X-CSRF-Token');
+    return token;
+  }
+
+  async function loadHoldDashboard() {
+    const tbody = document.getElementById('holdTableBody');
+    const counter = document.getElementById('txtDocCounter');
+    tbody.innerHTML = `<tr><td colspan="6" class="text-center p-12 text-slate-400">⏳ Sinkronisasi Live Data Antrean Staging...</td></tr>`;
+
+    try {
+      let formData = new FormData();
+      formData.append('action', 'list_hold');
+      formData.append('~csrf_token', getCsrfToken());
+
+      let response = await fetch(window.location.href, { method: 'POST', body: formData });
+      let result = await response.json();
+
+      if (result.status === 'success') {
+        counter.textContent = `${result.data.length} Invoice`;
+        if (result.data.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" class="text-center p-12 text-slate-400 text-sm">Tidak ada dokumen</td></tr>`;
+          return;
+        }
+
+        let html = '';
+        result.data.forEach(row => {
+          let formattedVal = parseFloat(row.amount).toLocaleString('id-ID', { minimumFractionDigits: 2 });
+          html += `
+            <tr class="hover:bg-slate-50/80 transition-all duration-75 border-b border-slate-100">
+              <td class="p-4 pl-6 font-mono font-bold text-emerald-600">${row.belnr} <span class="text-slate-400 font-normal text-xs">/ ${row.gjahr}</span></td>
+              <td class="p-4 text-slate-500 font-medium text-xs">${row.date}</td>
+              <td class="p-4 font-semibold text-slate-700">${row.xblnr || '—'}</td>
+              <td class="p-4">
+                <div class="font-bold text-slate-800 text-xs">${row.name1 || '—'}</div>
+                <div class="text-[11px] font-mono text-slate-400 mt-0.5">${parseInt(row.lifnr, 10)}</div>
+              </td>
+              <td class="p-4 text-right font-mono font-bold text-slate-900">${row.waers} ${formattedVal}</td>
+              <td class="p-4 text-center pr-6 whitespace-nowrap">
+                <button class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200/80 font-semibold text-xs px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 mx-auto active:scale-95 transition-all"
+                        onclick="openHoldUploadModal('${row.belnr}', '${row.gjahr}')">
+                  <svg class="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0
+01-6.364-6.364l1.757-1.75c.103-.1.168-.234.17-.378a3.903 3.903 0 00-.134-1.196 2.25 2.25 0 01.344-1.682l.747-1.024a2.25 2.25 0 012.825-.425l1.186.773a2.25 2.25 0 002.824-.425l.415-.47a.75.75 0 011.077 .112z"/><path stroke-linecap="round"
+stroke-linejoin="round" d="M10.81 15.312a4.5 4.5 0 01-1.242-7.244l4.5-4.5a4.5 4.5 0 016.364 6.364l-1.757 1.75a.75.75 0 11-1.06-1.06l1.757-1.75a3 3 0 10-4.243-4.242l-4.5 4.5a3 3 0 001.242 4.95a.75.75 0 01.446 1.054l-.415.47a.75.75 0 01-1.077-.112z"/></svg>
+                  Upload Docs
+                </button>
+              </td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } else {
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center p-12 text-red-500 font-semibold">❌ Gagal memuat data dashboard: ${result.message}</td></tr>`;
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-center p-12 text-red-500 font-semibold">❌ System Error: Gagal terhubung ke SAP application gateway.</td></tr>`;
+    }
+  }
+
+  function triggerFileSelect(type) {
+    document.getElementById('hid_input_' + type).click();
+  }
+
+  async function startWebcamStream(type) {
+    gActiveCamTarget = type;
+    const videoEl = document.getElementById('webcam_video');
+    const constraints = {
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    };
+    try {
+      gLocalStream = await navigator.mediaDevices.getUserMedia(constraints);
+      videoEl.srcObject = gLocalStream;
+      document.getElementById('modal_form_body').classList.add('hidden');
+      document.getElementById('modal_footer_actions').classList.add('hidden');
+      document.getElementById('webcam_capture_body').classList.remove('hidden');
+    } catch (err) {
+      alert("Gagal mengakses kamera perangkat: " + err.message);
+    }
+  }
+
+  function stopWebcamStream() {
+    if (gLocalStream) {
+      gLocalStream.getTracks().forEach(track => track.stop());
+      gLocalStream = null;
+    }
+    document.getElementById('webcam_capture_body').classList.add('hidden');
+    document.getElementById('modal_form_body').classList.remove('hidden');
+    document.getElementById('modal_footer_actions').classList.remove('hidden');
+  }
+
+  function captureWebcamSnapshot() {
+    const videoEl = document.getElementById('webcam_video');
+    const canvasEl = document.getElementById('hidden_canvas');
+    const type = gActiveCamTarget;
+    if (!videoEl.srcObject) return;
+
+    canvasEl.width = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+    const ctx = canvasEl.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+
+    const base64Data = canvasEl.toDataURL('image/jpeg', 0.6);
+    const timeStamp = new Date().getTime();
+    const generatedFileName = `CAM_${type}_${timeStamp}.jpg`;
+
+    gHoldFiles[type].push({
+      type: type,
+      name: generatedFileName,
+      mime: 'image/jpeg',
+      content: base64Data
+    });
+
+    document.getElementById('status_label_' + type).innerHTML = `<span class="text-slate-800 font-medium">Potret berhasil diambil</span>`;
+    renderFileList(type);
+    stopWebcamStream();
+  }
+
+  function renderFileList(type) {
+    const listCont = document.getElementById('file_list_' + type);
+    if (!listCont) return;
+    listCont.innerHTML = '';
+
+    gHoldFiles[type].forEach((file, index) => {
+      const row = document.createElement('div');
+      row.className = 'flex justify-between items-center bg-slate-50 text-slate-700 text-xs px-3 py-2 rounded-md border border-slate-200 shadow-3xs';
+      row.innerHTML = `
+        <span class="truncate font-medium max-w-[85%] text-slate-600">📄 ${file.name}</span>
+        <button onclick="removeFileFromQueue('${type}', ${index})" class="text-slate-400 hover:text-red-600 font-bold ml-2 text-base transition-colors" title="Hapus">&times;</button>
+      `;
+      listCont.appendChild(row);
+    });
+  }
+
+  function removeFileFromQueue(type, index) {
+    gHoldFiles[type].splice(index, 1);
+    renderFileList(type);
+    if(gHoldFiles[type].length === 0) {
+      document.getElementById('status_label_' + type).textContent = 'Pilih berkas atau ambil foto...';
+    }
+  }
+
+  const compressImage = (file, maxWidth = 1200, quality = 0.6) =>
+    new Promise((resolve, reject) => {
+      if (!file.type.startsWith('image/')) {
+        const r = new FileReader();
+        r.readAsDataURL(file);
+        r.onload = () => resolve(r.result);
+        r.onerror = error => reject(error);
+        return;
+      }
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = event => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let w = img.width, h = img.height;
+          if (w > maxWidth) {
+            h = Math.round(h * maxWidth / w);
+            w = maxWidth;
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = reject;
+      };
+      reader.onerror = reject;
+    });
+
+  function onFilePicked(type) {
+    const fileEl = document.getElementById('hid_input_' + type);
+    const files = fileEl.files;
+    if (files.length === 0) return;
+
+    Array.from(files).forEach(async (file) => {
+      try {
+        document.getElementById('status_label_' + type).innerHTML = `<span class="text-emerald-600 font-medium">⏳ Memproses Berkas...</span>`;
+        let base64Result = await compressImage(file, 1200, 0.6);
+        gHoldFiles[type].push({
+          type: type,
+          name: file.name,
+          mime: file.type.startsWith('image/') ? 'image/jpeg' : file.type,
+          content: base64Result
+        });
+        document.getElementById('status_label_' + type).innerHTML = `<span class="text-slate-800 font-medium">Berkas berhasil dilampirkan</span>`;
+        renderFileList(type);
+      } catch (err) {
+        alert('Gagal memproses berkas: ' + err.message);
+        document.getElementById('status_label_' + type).textContent = 'Gagal memproses berkas.';
+      }
+    });
+    fileEl.value = '';
+  }
+
+  function openHoldUploadModal(belnr, gjahr) {
+    gActiveBeln = belnr;
+    gActiveGjahr = gjahr;
+    gHoldFiles.INV = [];
+    gHoldFiles.TAX = [];
+    renderFileList('INV');
+    renderFileList('TAX');
+    document.getElementById('status_label_INV').textContent = 'Pilih berkas atau ambil foto...';
+    document.getElementById('status_label_TAX').textContent = 'Pilih berkas atau ambil foto...';
+    document.getElementById('lblModalInvoiceRef').innerHTML = `No. Referensi SAP: <strong class="text-slate-700 font-mono">${belnr}</strong> / ${gjahr}`;
+    document.getElementById('holdUploadModal').classList.add('open');
+  }
+
+  function closeHoldUploadModal() {
+    stopWebcamStream();
+    document.getElementById('holdUploadModal').classList.remove('open');
+  }
+
+  async function executeHoldUpload() {
+    const btn = document.getElementById('btnSubmitTax');
+    if (gHoldFiles.INV.length === 0 && gHoldFiles.TAX.length === 0) {
+      alert('Mohon lampirkan berkas sebelum menekan tombol Park!');
+      return;
+    }
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Menjalankan Status Park...';
+    let payload = [...gHoldFiles.INV, ...gHoldFiles.TAX];
+    try {
+      let formData = new FormData();
+      formData.append('action', 'upload_hold_docs');
+      formData.append('ref_doc', gActiveBeln);
+      formData.append('docs_json', JSON.stringify(payload));
+      formData.append('~csrf_token', getCsrfToken());
+      let response = await fetch(window.location.href, { method: 'POST', body: formData });
+      let result = await response.json();
+      if (result.status === 'success') {
+        alert('🚀 Sukses: Lampiran dokumen hold berhasil dikompres dan disimpan ke database SAP!');
+        closeHoldUploadModal();
+        loadHoldDashboard();
+      } else {
+        alert('❌ Gagal memproses penyimpanan: ' + result.message);
+      }
+    } catch (e) {
+      alert('❌ Fatal Gateway Error: Gagal terhubung ke aplikasi SAP. ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'Simpan & Park (MIRO)';
+    }
+  }
+
+  window.onload = function() {
+    loadHoldDashboard();
+  };
+</script>

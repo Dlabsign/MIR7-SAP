@@ -1,0 +1,329 @@
+<%@page language="abap"%>
+<%
+* ======================================================================
+* sidebar.htm — REVISED WITH RESPONSIVE & NEW "GR NOT INVOICE" MENU
+* ======================================================================
+
+  DATA: lv_sb_miro_pend TYPE i VALUE 0,
+        lv_sb_miro_appr TYPE i VALUE 0,
+        lv_sb_miro_rej  TYPE i VALUE 0,
+        lv_sb_miro_hold TYPE i VALUE 0, " Counter Hold dari ZAPP_LOG
+        lv_sb_fb60_pend TYPE i VALUE 0,
+        lv_sb_fb60_appr TYPE i VALUE 0,
+        lv_sb_fb60_rej  TYPE i VALUE 0.
+
+  TYPES: BEGIN OF ty_sb_log,
+           belnr  TYPE belnr_d,
+           gjahr  TYPE gjahr,
+           flag   TYPE i,
+           record TYPE i,
+         END OF ty_sb_log.
+
+  DATA: lt_sb_log_miro TYPE TABLE OF ty_sb_log, wa_sb_log_miro TYPE ty_sb_log,
+        lt_sb_log_fb60 TYPE TABLE OF ty_sb_log, wa_sb_log_fb60 TYPE ty_sb_log.
+
+  DATA: lt_sb_miro TYPE TABLE OF rbkp,  wa_sb_miro TYPE rbkp,
+        lt_sb_fb60 TYPE TABLE OF vbkpf, wa_sb_fb60 TYPE vbkpf.
+
+  DATA: lv_sb_date_from TYPE sy-datum.
+  lv_sb_date_from = sy-datum - 365. " Filter 1 tahun
+
+  " 1. MIRO Log Fetch & Counter
+  SELECT belnr, gjahr, flag, record FROM zapp_log
+    INTO CORRESPONDING FIELDS OF TABLE @lt_sb_log_miro.
+  IF lt_sb_log_miro IS NOT INITIAL.
+    SORT lt_sb_log_miro BY belnr ASCENDING gjahr ASCENDING record DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_sb_log_miro COMPARING belnr gjahr.
+    SORT lt_sb_log_miro BY belnr ASCENDING gjahr ASCENDING.
+  ENDIF.
+
+  LOOP AT lt_sb_log_miro INTO wa_sb_log_miro.
+    IF wa_sb_log_miro-flag = 1.
+      lv_sb_miro_appr = lv_sb_miro_appr + 1.
+    ELSEIF wa_sb_log_miro-flag = 0.
+      lv_sb_miro_rej = lv_sb_miro_rej + 1.
+    ELSEIF wa_sb_log_miro-flag = 2.
+      lv_sb_miro_hold = lv_sb_miro_hold + 1.
+    ENDIF.
+  ENDLOOP.
+
+  SELECT belnr, gjahr FROM rbkp INTO CORRESPONDING FIELDS OF TABLE @lt_sb_miro
+    WHERE rbstat IN ('A', 'B')
+      AND blart = 'RE'.
+
+  LOOP AT lt_sb_miro INTO wa_sb_miro.
+    READ TABLE lt_sb_log_miro INTO wa_sb_log_miro
+      WITH KEY belnr = wa_sb_miro-belnr gjahr = wa_sb_miro-gjahr
+      BINARY SEARCH.
+    IF sy-subrc = 0 AND ( wa_sb_log_miro-flag = 0 OR wa_sb_log_miro-flag = 1 OR wa_sb_log_miro-flag = 2 ).
+      CONTINUE.
+    ENDIF.
+    lv_sb_miro_pend = lv_sb_miro_pend + 1.
+  ENDLOOP.
+
+  " 2. FB60 badge
+  SELECT belnr, gjahr, flag, record FROM zapp_log2
+    INTO CORRESPONDING FIELDS OF TABLE @lt_sb_log_fb60.
+  IF lt_sb_log_fb60 IS NOT INITIAL.
+    SORT lt_sb_log_fb60 BY belnr ASCENDING gjahr ASCENDING record DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_sb_log_fb60 COMPARING belnr gjahr.
+    SORT lt_sb_log_fb60 BY belnr ASCENDING gjahr ASCENDING.
+  ENDIF.
+
+  LOOP AT lt_sb_log_fb60 INTO wa_sb_log_fb60.
+    IF wa_sb_log_fb60-flag = 1.
+      lv_sb_fb60_appr = lv_sb_fb60_appr + 1.
+    ELSEIF wa_sb_log_fb60-flag = 0.
+      lv_sb_fb60_rej = lv_sb_fb60_rej + 1.
+    ENDIF.
+  ENDLOOP.
+
+  SELECT belnr, gjahr, bktxt FROM vbkpf
+    INTO CORRESPONDING FIELDS OF TABLE @lt_sb_fb60
+    WHERE bstat = 'V'
+      AND budat >= @lv_sb_date_from.
+
+  LOOP AT lt_sb_fb60 INTO wa_sb_fb60.
+    IF wa_sb_fb60-bktxt IS INITIAL. CONTINUE. ENDIF.
+    READ TABLE lt_sb_log_fb60 INTO wa_sb_log_fb60
+      WITH KEY belnr = wa_sb_fb60-belnr gjahr = wa_sb_fb60-gjahr
+      BINARY SEARCH.
+    IF sy-subrc = 0 AND ( wa_sb_log_fb60-flag = 0 OR wa_sb_log_fb60-flag = 1 ).
+      CONTINUE.
+    ENDIF.
+    lv_sb_fb60_pend = lv_sb_fb60_pend + 1.
+  ENDLOOP.
+%>
+
+<button onclick="toggleSidebar()" class="lg:hidden fixed top-4 left-4 z-30 p-2 rounded-lg bg-[#12221C] text-[#64E0A0] border border-[#1D352C] shadow-lg focus:outline-none">
+    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
+</button>
+
+<div id="sidebar-overlay" onclick="toggleSidebar()" class="fixed inset-0 bg-black/60 z-30 hidden lg:hidden transition-opacity duration-300"></div>
+
+<aside id="app-sidebar" class="fixed lg:static top-0 left-0 h-screen w-72 bg-[#12221C] text-[#A6B5AF] flex flex-col flex-shrink-0 shadow-2xl z-40 border-r border-[#1D352C] transform -translate-x-full lg:translate-x-0 transition-transform duration-300
+ease-in-out">
+
+    <div class="h-20 flex items-center justify-between px-5 border-b border-[#1D352C] bg-[#12221C]">
+        <div class="flex items-center overflow-hidden w-full">
+            <div class="h-10 w-10 bg-white rounded-full flex items-center justify-center mr-3.5 flex-shrink-0 shadow-sm p-1.5">
+                <img src="logo KMI.png" alt="logokmi" class="max-h-full max-w-full object-contain opacity-95">
+            </div>
+            <div class="flex flex-col justify-center overflow-hidden w-full">
+                <div class="text-[18px] font-bold text-white tracking-wide leading-tight">SAP FICO</div>
+                <div class="text-[10px] text-gray-400 font-bold mt-0.5 tracking-widest uppercase">
+                    WEB APPROVAL PORTAL
+                </div>
+            </div>
+        </div>
+
+        <button onclick="toggleSidebar()" class="lg:hidden p-1 rounded-md hover:bg-[#1D352C] text-gray-400 hover:text-white">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+        </button>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto py-5 px-3 space-y-2 scrollbar-thin scrollbar-thumb-[#1D352C]">
+
+        <%
+          " ---- Badge PO Outstanding ----
+          DATA: lv_sb_po_cnt TYPE i VALUE 0.
+          DATA: BEGIN OF ls_sb_po_join,
+                  ebeln TYPE ekko-ebeln,
+                  ebelp TYPE ekpo-ebelp,
+                  menge TYPE ekpo-menge,
+                  netpr TYPE ekpo-netpr,
+                END OF ls_sb_po_join,
+                lt_sb_po_join LIKE TABLE OF ls_sb_po_join.
+
+          DATA: BEGIN OF ls_sb_po_ekbe,
+                  ebeln TYPE ekbe-ebeln,
+                  ebelp TYPE ekbe-ebelp,
+                  vgabe TYPE ekbe-vgabe,
+                  menge TYPE ekbe-menge,
+                  shkzg TYPE ekbe-shkzg,
+                END OF ls_sb_po_ekbe,
+                lt_sb_po_ekbe LIKE TABLE OF ls_sb_po_ekbe.
+
+          SELECT k~ebeln, p~ebelp, p~menge, p~netpr
+            FROM ekko AS k
+            INNER JOIN ekpo AS p ON p~ebeln = k~ebeln
+            WHERE p~loekz = ''
+              AND k~loekz = ''
+              AND k~aedat >= @lv_sb_date_from
+            INTO CORRESPONDING FIELDS OF TABLE @lt_sb_po_join.
+
+          IF lt_sb_po_join IS NOT INITIAL.
+            SELECT ebeln, ebelp, vgabe, menge, shkzg
+              FROM ekbe
+              FOR ALL ENTRIES IN @lt_sb_po_join
+              WHERE ebeln = @lt_sb_po_join-ebeln
+                AND ebelp = @lt_sb_po_join-ebelp
+                AND vgabe IN ('1', '2')
+              INTO CORRESPONDING FIELDS OF TABLE @lt_sb_po_ekbe.
+
+            SORT lt_sb_po_join BY ebeln ebelp.
+            SORT lt_sb_po_ekbe BY ebeln ebelp vgabe.
+
+            DATA: lv_sb_tabix TYPE sytabix,
+                  lv_sb_pgr   TYPE ekbe-menge,
+                  lv_sb_pir   TYPE ekbe-menge.
+
+            LOOP AT lt_sb_po_join ASSIGNING FIELD-SYMBOL(<ls_sb_pj>).
+              CLEAR: lv_sb_pgr, lv_sb_pir.
+
+              READ TABLE lt_sb_po_ekbe
+                WITH KEY ebeln = <ls_sb_pj>-ebeln
+                         ebelp = <ls_sb_pj>-ebelp
+                         vgabe = '1'
+                TRANSPORTING NO FIELDS BINARY SEARCH.
+              IF sy-subrc = 0.
+                lv_sb_tabix = sy-tabix.
+                LOOP AT lt_sb_po_ekbe ASSIGNING FIELD-SYMBOL(<ls_sb_pe>) FROM lv_sb_tabix.
+                  IF <ls_sb_pe>-ebeln <> <ls_sb_pj>-ebeln
+                  OR <ls_sb_pe>-ebelp <> <ls_sb_pj>-ebelp
+                  OR <ls_sb_pe>-vgabe <> '1'. EXIT. ENDIF.
+                  IF <ls_sb_pe>-shkzg = 'S'.
+                    lv_sb_pgr = lv_sb_pgr + <ls_sb_pe>-menge.
+                  ELSE.
+                    lv_sb_pgr = lv_sb_pgr - <ls_sb_pe>-menge.
+                  ENDIF.
+                ENDLOOP.
+              ENDIF.
+
+              READ TABLE lt_sb_po_ekbe
+                WITH KEY ebeln = <ls_sb_pj>-ebeln
+                         ebelp = <ls_sb_pj>-ebelp
+                         vgabe = '2'
+                TRANSPORTING NO FIELDS BINARY SEARCH.
+              IF sy-subrc = 0.
+                lv_sb_tabix = sy-tabix.
+                LOOP AT lt_sb_po_ekbe ASSIGNING FIELD-SYMBOL(<ls_sb_pi>) FROM lv_sb_tabix.
+                  IF <ls_sb_pi>-ebeln <> <ls_sb_pj>-ebeln
+                  OR <ls_sb_pi>-ebelp <> <ls_sb_pj>-ebelp
+                  OR <ls_sb_pi>-vgabe <> '2'. EXIT. ENDIF.
+                  IF <ls_sb_pi>-shkzg = 'S'.
+                    lv_sb_pir = lv_sb_pir + <ls_sb_pi>-menge.
+                  ELSE.
+                    lv_sb_pir = lv_sb_pir - <ls_sb_pi>-menge.
+                  ENDIF.
+                ENDLOOP.
+              ENDIF.
+
+              IF lv_sb_pgr - lv_sb_pir > 0.
+                lv_sb_po_cnt = lv_sb_po_cnt + 1.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+        %>
+
+        <div class="space-y-1">
+            <div class="flex items-center justify-between px-4 py-3 rounded-lg border border-[#233F35] bg-[#1A3329] text-white font-semibold shadow-sm">
+                <div class="flex items-center">
+                    <svg class="w-5 h-5 mr-3 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0a2 2 0 01-2 2H6a2 2 0 01-2-2m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0
+01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                    </svg>
+                    <span class="text-sm tracking-wide">Outstanding PO</span>
+                </div>
+                <span class="flex-shrink-0 inline-flex items-center justify-center min-w-[24px] h-5 px-1.5 rounded bg-[#102C20] border border-[#1B4030] text-[#64E0A0] text-[11px] font-bold leading-none">
+                    <%= lv_sb_po_cnt %>
+                </span>
+            </div>
+
+            <div class="pl-2 pt-1 space-y-1">
+                <a href="index2.htm" class="flex items-center px-4 py-3 rounded-lg transition-all duration-150 group <% IF gv_active_page = 'GR_NOT_INVOICE'. %> bg-[#1D352C] text-emerald-100 font-medium <% ELSE. %> text-gray-300 hover:bg-[#1A3329]
+hover:text-white <% ENDIF. %>">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 <% IF gv_active_page = 'GR_NOT_INVOICE'. %> text-emerald-300 <% ELSE. %> text-emerald-500/80 group-hover:text-emerald-300 <% ENDIF. %> transition-colors" fill="none" stroke="currentColor"
+viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    <span class="text-sm font-medium flex-1">GR Not Invoice</span>
+                </a>
+
+                <a href="parked_doc.htm" class="flex items-center px-4 py-3 rounded-lg transition-all duration-150 group <% IF gv_active_page = 'PARKED'. %> bg-[#1D352C] text-emerald-100 font-medium <% ELSE. %> text-gray-300 hover:bg-[#1A3329]
+hover:text-white <% ENDIF. %>">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 <% IF gv_active_page = 'PARKED'. %> text-emerald-300 <% ELSE. %> text-emerald-500/80 group-hover:text-emerald-300 <% ENDIF. %> transition-colors" fill="none" stroke="currentColor" viewBox="0 0
+24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
+                    </svg>
+                    <span class="text-sm font-medium flex-1">Parked</span>
+                    <span class="ml-auto flex-shrink-0 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded bg-[#102C20] border border-[#1B4030] text-[#64E0A0] text-[10px] font-bold leading-none">
+                        <%= lv_sb_miro_pend %>
+                    </span>
+                </a>
+
+                <a href="hold.htm" class="flex items-center px-4 py-3 rounded-lg transition-all duration-150 group <% IF gv_active_page = 'HOLD'. %> bg-[#1D352C] text-emerald-100 font-medium <% ELSE. %> text-gray-300 hover:bg-[#1A3329] hover:text-white
+<% ENDIF. %>">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 <% IF gv_active_page = 'HOLD'. %> text-emerald-300 <% ELSE. %> text-emerald-500/80 group-hover:text-emerald-300 <% ENDIF. %> transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24
+24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                    </svg>
+                    <span class="text-sm font-medium flex-1">Hold</span>
+                    <span class="ml-auto flex-shrink-0 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded bg-[#102C20] border border-[#1B4030] text-[#64E0A0] text-[10px] font-bold leading-none">
+                        <%= lv_sb_miro_hold %>
+                    </span>
+                </a>
+
+                <a href="pa_dashboard.htm" class="flex items-center px-4 py-3 rounded-lg transition-all duration-150 group <% IF gv_active_page = 'DASHBOARD'. %> bg-[#1D352C] text-emerald-100 font-medium <% ELSE. %> text-gray-300 hover:bg-[#1A3329]
+hover:text-white <% ENDIF. %>">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 <% IF gv_active_page = 'DASHBOARD'. %> text-emerald-300 <% ELSE. %> text-emerald-500/80 group-hover:text-emerald-300 <% ENDIF. %> transition-colors" fill="none" stroke="currentColor" viewBox="0
+0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <span class="text-sm font-medium flex-1">Approved</span>
+                    <span class="ml-auto flex-shrink-0 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded bg-[#102C20] border border-[#1B4030] text-[#64E0A0] text-[10px] font-bold leading-none">
+                        <%= lv_sb_miro_appr %>
+                    </span>
+                </a>
+
+                <a href="reject_dashboard.htm" class="flex items-center px-4 py-3 rounded-lg transition-all duration-150 group <% IF gv_active_page = 'REJECT_DASHBOARD'. %> bg-[#1D352C] text-emerald-100 font-medium <% ELSE. %> text-gray-300
+hover:bg-[#1A3329] hover:text-white <% ENDIF. %>">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 <% IF gv_active_page = 'REJECT_DASHBOARD'. %> text-emerald-300 <% ELSE. %> text-emerald-500/80 group-hover:text-emerald-300 <% ENDIF. %> transition-colors" fill="none" stroke="currentColor"
+viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <span class="text-sm font-medium flex-1">Rejected</span>
+                    <span class="ml-auto flex-shrink-0 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded bg-[#102C20] border border-[#1B4030] text-[#64E0A0] text-[10px] font-bold leading-none">
+                        <%= lv_sb_miro_rej %>
+                    </span>
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="p-4 border-t border-[#1D352C] bg-[#0D1814]">
+        <div class="text-[10px] text-emerald-500/60 mb-3 uppercase tracking-widest font-bold">Logged In As</div>
+        <div class="flex items-center gap-3 mb-3">
+            <div class="flex-shrink-0 w-9 h-9 rounded-full bg-[#132A21] border border-[#1B4030] flex items-center justify-center">
+                <svg class="w-5 h-5 text-[#64E0A0]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                </svg>
+            </div>
+            <div class="overflow-hidden">
+                <div class="text-[11px] text-[#A6B5AF] font-medium leading-tight">Selamat datang,</div>
+                <div class="text-[14px] font-bold text-white truncate leading-tight mt-0.5"><%= sy-uname %></div>
+            </div>
+        </div>
+        <button onclick="doLogout()" class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-transparent border border-[#2A4A3E] hover:bg-red-900/30 hover:border-red-500/50 text-[12px] font-semibold text-[#A6B5AF] hover:text-red-400
+transition-all duration-150 cursor-pointer group">
+            <svg class="w-4 h-4 text-white/40 group-hover:text-red-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+            </svg>
+            Logout
+        </button>
+    </div>
+</aside>
+
+<script>
+    function toggleSidebar() {
+        const sidebar = document.getElementById('app-sidebar');
+        const overlay = document.getElementById('sidebar-overlay');
+
+        sidebar.classList.toggle('-translate-x-full');
+        overlay.classList.toggle('hidden');
+    }
+</script>
